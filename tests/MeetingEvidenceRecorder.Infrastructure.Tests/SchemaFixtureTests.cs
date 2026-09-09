@@ -114,4 +114,37 @@ public class SchemaFixtureTests
         Assert.True(Matches(Schema("session"), node));
         Assert.Empty(ContractValidation.Validate(BundleJson.ReadSession(BundleJson.Utf8.GetBytes(node.ToJsonString()))));
     }
+
+    [Fact]
+    public void MicrophoneDisabledCannotDeclareADevice()
+    {
+        var node = JsonNode.Parse(File.ReadAllText(Path.Combine(Fixture("valid-video-only"), "session.json")))!;
+        node["recording"]!["audio"]!["microphone_device"] = "USB Microphone";
+
+        Assert.False(Matches(Schema("session"), node));
+        Assert.Contains(ContractValidation.Validate(BundleJson.ReadSession(BundleJson.Utf8.GetBytes(node.ToJsonString()))),
+            d => d.Code == "BUNDLE_AUDIO_METADATA_INCONSISTENT");
+    }
+
+    [Fact]
+    public void MicrophoneDeviceNullWhenDisabledRemainsValid()
+    {
+        var node = JsonNode.Parse(File.ReadAllText(Path.Combine(Fixture("valid-video-only"), "session.json")))!;
+        node["recording"]!["audio"]!["microphone_device"] = null;
+
+        Assert.True(Matches(Schema("session"), node));
+        Assert.DoesNotContain(ContractValidation.Validate(BundleJson.ReadSession(BundleJson.Utf8.GetBytes(node.ToJsonString()))),
+            d => d.Code == "BUNDLE_AUDIO_METADATA_INCONSISTENT");
+    }
+
+    [Fact]
+    public void MicrophoneDeviceRemainsValidWhenMicrophoneIsEnabled()
+    {
+        var node = JsonNode.Parse(File.ReadAllText(Path.Combine(Fixture("valid-microphone-only"), "session.json")))!;
+        node["recording"]!["audio"]!["microphone_device"] = "USB Microphone";
+
+        Assert.True(Matches(Schema("session"), node));
+        Assert.DoesNotContain(ContractValidation.Validate(BundleJson.ReadSession(BundleJson.Utf8.GetBytes(node.ToJsonString()))),
+            d => d.Code == "BUNDLE_AUDIO_METADATA_INCONSISTENT");
+    }
 }

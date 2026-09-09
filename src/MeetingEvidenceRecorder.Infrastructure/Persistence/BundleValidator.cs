@@ -41,9 +41,21 @@ public sealed class BundleValidator
                 diagnostics.Add(new("BUNDLE_STATUS_NOT_COMPLETED", "Input is not a completed bundle.",
                     mode == BundleReadMode.Strict ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning));
 
+            var portablePaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            void RegisterPortablePath(string path)
+            {
+                if (portablePaths.TryGetValue(path, out var prior) && prior != path)
+                    diagnostics.Add(new("BUNDLE_PATH_INVALID",
+                        "Bundle paths differ only by case and are not portable across supported filesystems.", Path: path));
+                else
+                    portablePaths[path] = path;
+            }
+            RegisterPortablePath("session.json");
+
             void Reference(string? reference, string code, bool required)
             {
                 if (reference is null) return; // Required missing fields already diagnosed by the contract validator.
+                RegisterPortablePath(reference);
                 try
                 {
                     var path = resolver.Resolve(reference);
@@ -54,6 +66,7 @@ public sealed class BundleValidator
             Reference(session.Recording?.File, "BUNDLE_RECORDING_MISSING", session.Status == SessionStatus.Completed);
             if (session.EventsFile is not null)
             {
+                RegisterPortablePath(session.EventsFile);
                 var journalPath = resolver.Resolve(session.EventsFile);
                 if (!File.Exists(journalPath)) diagnostics.Add(new("BUNDLE_EVENTS_MISSING", "Referenced journal is missing.", Path: session.EventsFile));
                 else
@@ -66,7 +79,6 @@ public sealed class BundleValidator
                     }
                     catch (DecoderFallbackException ex) { diagnostics.Add(new("BUNDLE_EVENTS_INVALID", ex.Message, Path: session.EventsFile)); }
                     var ids = new HashSet<string>(StringComparer.Ordinal);
-                    var assets = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     long previous = -1;
                     foreach (var entry in events)
                     {
@@ -78,9 +90,6 @@ public sealed class BundleValidator
                         if (entry is ScreenshotEvent shot)
                         {
                             Reference(shot.Asset, "BUNDLE_ASSET_MISSING", true);
-                            if (assets.TryGetValue(shot.Asset, out var prior) && prior != shot.Asset)
-                                diagnostics.Add(new("BUNDLE_PATH_INVALID", "Screenshot paths differ only by case.", Path: shot.Asset));
-                            assets[shot.Asset] = shot.Asset;
                         }
                     }
                 }

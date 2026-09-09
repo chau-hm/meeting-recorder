@@ -39,7 +39,8 @@
             {"if": {"required": ["output_mode"], "properties": {"output_mode": {"const": "system_audio_only"}}}, "then": {"properties": {"system_audio": {"const": true}, "microphone": {"const": false}}}},
             {"if": {"required": ["output_mode"], "properties": {"output_mode": {"const": "microphone_only"}}}, "then": {"properties": {"system_audio": {"const": false}, "microphone": {"const": true}}}},
             {"if": {"required": ["output_mode"], "properties": {"output_mode": {"const": "none"}}}, "then": {"properties": {"system_audio": {"const": false}, "microphone": {"const": false}, "sample_rate": {"type": "null"}}}},
-            {"if": {"required": ["system_audio", "microphone"], "properties": {"system_audio": {"const": false}, "microphone": {"const": false}}}, "then": {"required": ["output_mode"], "properties": {"output_mode": {"const": "none"}}}}
+            {"if": {"required": ["system_audio", "microphone"], "properties": {"system_audio": {"const": false}, "microphone": {"const": false}}}, "then": {"required": ["output_mode"], "properties": {"output_mode": {"const": "none"}}}},
+            {"if": {"required": ["microphone"], "properties": {"microphone": {"const": false}}}, "then": {"properties": {"microphone_device": {"type": "null"}}}}
           ]
         }
       }

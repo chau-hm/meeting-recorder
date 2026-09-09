@@ -36,6 +36,8 @@ public static class ContractValidation
         var audio = manifest.Recording.Audio;
         if (audio.SampleRate <= 0)
             Error("BUNDLE_AUDIO_METADATA_INCONSISTENT", "Audio sample_rate must be positive or null.");
+        if (audio.Microphone == false && audio.MicrophoneDevice is not null)
+            Error("BUNDLE_AUDIO_METADATA_INCONSISTENT", "microphone_device must be null when microphone is false.");
         bool inconsistent = audio.OutputMode switch
         {
             "mixed" => audio.SystemAudio == false || audio.Microphone == false,
