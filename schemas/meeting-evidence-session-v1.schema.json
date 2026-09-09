@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/chau-hm/meeting-recorder/schemas/meeting-evidence-session-v1.schema.json",
+  "title": "Meeting Evidence Bundle v1 session",
+  "type": "object",
+  "required": ["schema_version", "session_id", "created_at", "duration_ms", "status", "recording", "application", "platform"],
+  "properties": {
+    "schema_version": {"type": "string", "pattern": "^1\\.[0-9]+$(?![\\s\\S])"},
+    "session_id": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "created_at": {"type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"},
+    "duration_ms": {"type": ["integer", "null"], "minimum": 0, "maximum": 9223372036854775807},
+    "status": {"enum": ["initializing", "recording", "paused", "finalizing", "completed", "incomplete", "failed"]},
+    "recording": {
+      "type": "object", "required": ["video", "audio"],
+      "properties": {
+        "file": {"$ref": "#/$defs/path"},
+        "video": {
+          "type": "object",
+          "properties": {
+            "source_type": {"type": "string"},
+            "width": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+            "height": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+            "fps": {"type": "number", "exclusiveMinimum": 0}
+          }
+        },
+        "audio": {
+          "type": "object",
+          "properties": {
+            "system_audio": {"type": "boolean"},
+            "microphone": {"type": "boolean"},
+            "microphone_device": {"type": ["string", "null"]},
+            "output_mode": {"type": "string"},
+            "sample_rate": {"type": ["integer", "null"], "minimum": 1, "maximum": 2147483647},
+            "system_audio_capture_mode": {"type": "string"},
+            "synchronized_to_recording_timeline": {"type": "boolean"}
+          },
+          "allOf": [
+            {"if": {"required": ["output_mode"], "properties": {"output_mode": {"const": "mixed"}}}, "then": {"properties": {"system_audio": {"const": true}, "microphone": {"const": true}}}},
+            {"if": {"required": ["output_mode"], "properties": {"output_mode": {"const": "system_audio_only"}}}, "then": {"properties": {"system_audio": {"const": true}, "microphone": {"const": false}}}},
+            {"if": {"required": ["output_mode"], "properties": {"output_mode": {"const": "microphone_only"}}}, "then": {"properties": {"system_audio": {"const": false}, "microphone": {"const": true}}}},
+            {"if": {"required": ["output_mode"], "properties": {"output_mode": {"const": "none"}}}, "then": {"properties": {"system_audio": {"const": false}, "microphone": {"const": false}, "sample_rate": {"type": "null"}}}},
+            {"if": {"required": ["system_audio", "microphone"], "properties": {"system_audio": {"const": false}, "microphone": {"const": false}}}, "then": {"required": ["output_mode"], "properties": {"output_mode": {"const": "none"}}}}
+          ]
+        }
+      }
+    },
+    "events_file": {"$ref": "#/$defs/path"},
+    "application": {"type": "object", "properties": {"name": {"type": "string"}, "version": {"type": "string"}}},
+    "platform": {"type": "object", "properties": {"os": {"type": "string"}, "architecture": {"type": "string"}}}
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "completed"}}}, "then": {"properties": {"duration_ms": {"type": "integer", "minimum": 1}, "recording": {"required": ["file"]}}}},
+    {"if": {"properties": {"status": {"not": {"const": "initializing"}}}}, "then": {"required": ["events_file"]}}
+  ],
+  "$defs": {
+    "path": {
+      "type": "string", "minLength": 1,
+      "pattern": "^(?!/)(?!.*[\\\\:*?\"<>|\\u0000-\\u001f])(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9¹²³]|[Ll][Pp][Tt][1-9¹²³])(?:\\.|/|$))(?!.*[. ](?:/|$))[^/]+(?:/[^/]+)*$"
+    }
+  }
+}
