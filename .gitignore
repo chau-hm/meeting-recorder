@@ -1,0 +1,4 @@
+**/bin/
+**/obj/
+TestResults/
+.DS_Store
