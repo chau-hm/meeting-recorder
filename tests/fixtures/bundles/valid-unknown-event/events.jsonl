@@ -1,0 +1,2 @@
+{"event_id":"evt-000001","type":"screenshot","timestamp_ms":1000,"asset":"screenshots/shot.png"}
+{"event_id":"evt-future","type":"question","timestamp_ms":1000,"note":"Synthetic marker"}

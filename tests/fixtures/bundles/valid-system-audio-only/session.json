@@ -1,0 +1,34 @@
+{
+  "schema_version": "1.0",
+  "session_id": "7e177f69-1d91-43ef-b554-d9529148f121",
+  "created_at": "2026-09-09T10:30:00+08:00",
+  "duration_ms": 7200000,
+  "status": "completed",
+  "recording": {
+    "file": "recording.mp4",
+    "video": {
+      "source_type": "display",
+      "width": 1,
+      "height": 1,
+      "fps": 1
+    },
+    "audio": {
+      "system_audio": true,
+      "microphone": false,
+      "microphone_device": null,
+      "output_mode": "system_audio_only",
+      "sample_rate": 48000,
+      "system_audio_capture_mode": "os_native",
+      "synchronized_to_recording_timeline": true
+    }
+  },
+  "events_file": "events.jsonl",
+  "application": {
+    "name": "Synthetic contract fixture",
+    "version": "0.1.0"
+  },
+  "platform": {
+    "os": "fixture",
+    "architecture": "portable"
+  }
+}
