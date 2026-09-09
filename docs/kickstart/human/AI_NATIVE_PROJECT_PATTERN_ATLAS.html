@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>AI-native Project Kickstart — Pattern Atlas</title>
+<style>
+:root{
+  --bg:#f4f3ee;--panel:#fffdf9;--panel2:#ecebe5;--ink:#2c3040;--muted:#727581;
+  --line:#cecec6;--accent:#eb6a36;--accent2:#f7dfd4;--blue:#dce8f4;--green:#dfeadf;
+  --yellow:#f3e8bd;--rose:#f3dede;--shadow:0 18px 55px rgba(44,48,64,.08);
+  --sans:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang TC","Noto Sans TC",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+}
+*{box-sizing:border-box} html{scroll-behavior:smooth;background:var(--bg);color:var(--ink)}
+body{margin:0;font-family:var(--sans);line-height:1.55}
+main{max-width:1480px;margin:0 auto;padding:58px 28px 80px}
+.eyebrow{font:700 11px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:15px}
+h1{margin:0;max-width:1160px;font-size:clamp(38px,5vw,70px);line-height:1.02;letter-spacing:-.05em}
+.lede{max-width:1100px;margin:22px 0 0;font-size:20px;color:var(--muted)}
+.hero-grid{display:grid;grid-template-columns:1.35fr .65fr;gap:18px;margin-top:34px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow)}
+.pad{padding:24px 26px}.thesis{border-left:4px solid var(--accent);border-radius:0 18px 18px 0}
+.thesis strong{color:var(--accent)} .mini h3{margin:0 0 10px;font-size:18px}.mini ol{margin:0;padding-left:20px}
+.mini li{margin:7px 0;color:var(--muted)}
+nav{margin-top:26px;display:flex;flex-wrap:wrap;gap:8px}
+nav a{text-decoration:none;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:8px 11px;font:700 10px var(--mono)}
+.pattern{margin-top:64px}
+.pattern-head{display:grid;grid-template-columns:92px 1fr auto;gap:18px;align-items:start;margin-bottom:16px}
+.num{font:800 44px/1 var(--mono);color:var(--accent)} .pattern h2{margin:0;font-size:30px;letter-spacing:-.03em}
+.pattern .tag{font:700 10px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding-top:7px}
+.pattern .desc{margin:8px 0 0;color:var(--muted);max-width:960px}
+.diagram{padding:18px;overflow:auto}
+svg{width:100%;min-width:1080px;height:auto;display:block}
+.node{fill:var(--panel);stroke:#bebfb8;stroke-width:1.2}.accent{fill:var(--accent2);stroke:var(--accent);stroke-width:1.6}
+.blue{fill:var(--blue)}.green{fill:var(--green)}.yellow{fill:var(--yellow)}.rose{fill:var(--rose)}.soft{fill:var(--panel2)}
+.t{font:700 15px var(--sans);fill:var(--ink)}.s{font:500 10.5px var(--mono);fill:var(--muted)}
+.flow{fill:none;stroke:#767984;stroke-width:1.7;marker-end:url(#arrow)} .flowA{fill:none;stroke:var(--accent);stroke-width:2.1;marker-end:url(#arrowA)}
+.dash{fill:none;stroke:var(--accent);stroke-width:1.5;stroke-dasharray:6 5;marker-end:url(#arrowA)}
+.note-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
+.note{padding:18px}.note h3{margin:0 0 7px;font-size:16px}.note p{margin:0;color:var(--muted);font-size:14px}
+.summary{margin-top:66px}
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:18px;overflow:hidden;box-shadow:var(--shadow)}
+th,td{padding:14px 16px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+th{background:var(--panel2);font:700 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+td:first-child{font-weight:750;white-space:nowrap} tr:last-child td{border-bottom:0}
+footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:20px;color:var(--muted);font:500 11px/1.6 var(--mono)}
+@media(max-width:900px){main{padding:38px 18px 56px}.hero-grid,.note-grid{grid-template-columns:1fr}.pattern-head{grid-template-columns:68px 1fr}.pattern-head .tag{grid-column:2}.num{font-size:34px}footer{flex-direction:column}}
+</style>
+</head>
+<body>
+<main>
+<div class="eyebrow">AI-native Project Kickstart · Human-facing Pattern Atlas</div>
+<h1>十個可跨 project 重用嘅 operating patterns</h1>
+<p class="lede">呢套 patterns 由實際 AI-assisted software delivery 中抽象出嚟：重點唔係某個 framework，而係點樣令 product intent、architecture、agent work、evidence、Git 同 release 形成一套可控、可驗證、可持續演化嘅 operating model。</p>
+
+<div class="hero-grid">
+  <section class="card pad thesis"><strong>總原則：</strong> Experience 決定方向；Specs 保護契約；Repository state 勝過 stale plan；PR 應交付 coherent vertical slice；agent complexity 只按風險證據升級；所有 claim 都要有可推翻舊缺陷嘅 evidence；integration、review 同 release 必須分開。</section>
+  <aside class="card pad mini"><h3>適合用喺</h3><ol><li>AI-heavy greenfield project</li><li>Codex / agent worktree workflow</li><li>複雜 UI / simulation / domain system</li><li>多人 + 多 agent 平行開發</li></ol></aside>
+</div>
+
+<nav>
+<a href="#p1">01 Spec → Guardrail</a><a href="#p2">02 Vertical Slice</a><a href="#p3">03 Canonical State</a>
+<a href="#p4">04 Evidence Integrity</a><a href="#p5">05 Durable Context</a><a href="#p6">06 Merge Gate</a>
+<a href="#p7">07 Fail-Closed VCS</a><a href="#p8">08 Release Promotion</a><a href="#p9">09 Freeze Areas</a>
+<a href="#p10">10 Cognitive Routing</a>
+</nav>
+
+<section class="pattern" id="p1">
+<div class="pattern-head"><div class="num">01</div><div><h2>Baseline Specs + Current Repo Truth + Risk-Adaptive Delivery</h2><p class="desc">PRD / SDD / ADR 保留長壽命 intent 與 contracts；真正 execution 每輪由 current repository + current gap 重新生成，避免 stale task inventory 變成錯誤權威。</p></div><div class="tag">Layered Flow</div></div>
+<div class="card diagram"><svg viewBox="0 0 1240 340"><defs><marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#767984"/></marker><marker id="arrowA" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#eb6a36"/></marker></defs>
+<rect x="40" y="50" width="210" height="74" rx="10" class="node blue"/><text x="145" y="80" text-anchor="middle" class="t">Stable Baseline Specs</text><text x="145" y="100" text-anchor="middle" class="s">PRD · SDD · ADR · invariants</text>
+<rect x="315" y="50" width="210" height="74" rx="10" class="node green"/><text x="420" y="80" text-anchor="middle" class="t">Current Repository</text><text x="420" y="100" text-anchor="middle" class="s">code · tests · behaviour</text>
+<rect x="590" y="50" width="210" height="74" rx="10" class="node accent"/><text x="695" y="80" text-anchor="middle" class="t">Current Gap</text><text x="695" y="100" text-anchor="middle" class="s">what is missing now?</text>
+<rect x="865" y="50" width="210" height="74" rx="10" class="node yellow"/><text x="970" y="80" text-anchor="middle" class="t">Coherent PR Intent</text><text x="970" y="100" text-anchor="middle" class="s">smallest meaningful outcome</text>
+<path d="M250 87H315" class="flow"/><path d="M525 87H590" class="flowA"/><path d="M800 87H865" class="flow"/>
+<rect x="315" y="205" width="760" height="82" rx="12" class="node soft"/><text x="695" y="235" text-anchor="middle" class="t">Execution plan is regenerated from present evidence</text><text x="695" y="258" text-anchor="middle" class="s">repo → behaviour → gap → bounded PR, not blind execution of stale tasks</text>
+</svg></div>
+<div class="note-grid"><div class="card note"><h3>Use when</h3><p>Project 有長期 specs，但 implementation 會快速演化，尤其 agent 可能持有舊計劃。</p></div><div class="card note"><h3>Avoid</h3><p>將巨大 task inventory 當永久 execution queue；歷史 prompt 不應覆蓋 current repo truth。</p></div></div>
+</section>
+
+<section class="pattern" id="p2">
+<div class="pattern-head"><div class="num">02</div><div><h2>Coherent Vertical Slice PR</h2><p class="desc">每個 PR 應盡量交付一個 Visible → Operable → Coherent → Verifiable outcome，而唔係先完成一整層再等幾個 PR 後先見到 user value。</p></div><div class="tag">Vertical Slice</div></div>
+<div class="card diagram"><svg viewBox="0 0 1240 360"><defs><marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#767984"/></marker><marker id="arrowA" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#eb6a36"/></marker></defs>
+<text x="60" y="42" class="s">ANTI-PATTERN · HORIZONTAL LAYERS</text>
+<rect x="60" y="62" width="160" height="58" rx="8" class="node blue"/><text x="140" y="97" text-anchor="middle" class="t">Data Model</text>
+<rect x="235" y="62" width="160" height="58" rx="8" class="node green"/><text x="315" y="97" text-anchor="middle" class="t">Domain Logic</text>
+<rect x="410" y="62" width="160" height="58" rx="8" class="node yellow"/><text x="490" y="97" text-anchor="middle" class="t">UI / Rendering</text>
+<rect x="585" y="62" width="160" height="58" rx="8" class="node rose"/><text x="665" y="97" text-anchor="middle" class="t">Tasks / Tests</text>
+<path d="M220 91H235M395 91H410M570 91H585" class="flow"/>
+<text x="60" y="182" class="s">PREFERRED · COHERENT VERTICAL SLICES</text>
+<rect x="60" y="206" width="310" height="105" rx="10" class="node accent"/><text x="215" y="235" text-anchor="middle" class="t">Slice A · Exists</text><text x="215" y="258" text-anchor="middle" class="s">entry + basic state + visible problem</text>
+<rect x="465" y="206" width="310" height="105" rx="10" class="node green"/><text x="620" y="235" text-anchor="middle" class="t">Slice B · Real Behaviour</text><text x="620" y="258" text-anchor="middle" class="s">control + domain response + feedback</text>
+<rect x="870" y="206" width="310" height="105" rx="10" class="node blue"/><text x="1025" y="235" text-anchor="middle" class="t">Slice C · Validate</text><text x="1025" y="258" text-anchor="middle" class="s">guided outcome + calibration + evidence</text>
+<path d="M370 258H465" class="flowA"/><path d="M775 258H870" class="flowA"/>
+</svg></div>
+<div class="note-grid"><div class="card note"><h3>Rule of thumb</h3><p>Reviewer 應該可以用 user-observable outcome 描述個 PR，而唔只係「完成咗某 layer」。</p></div><div class="card note"><h3>Benefit</h3><p>減少 integration surprise，令每次 merge 都保持 coherent system state。</p></div></div>
+</section>
+
+<section class="pattern" id="p3">
+<div class="pattern-head"><div class="num">03</div><div><h2>Canonical Domain State → Derived Views</h2><p class="desc">核心 domain truth 只保留一份；UI、renderer、readout、task、report、projection 等全部 derive，而唔各自偷偷重算。</p></div><div class="tag">Hub & Spoke</div></div>
+<div class="card diagram"><svg viewBox="0 0 1240 400"><circle cx="620" cy="200" r="92" fill="#f7dfd4" stroke="#eb6a36" stroke-width="2"/><text x="620" y="188" text-anchor="middle" class="t">Canonical</text><text x="620" y="211" text-anchor="middle" class="t">Domain State</text><text x="620" y="235" text-anchor="middle" class="s">single source of truth</text>
+<rect x="80" y="70" width="210" height="70" rx="10" class="node blue"/><text x="185" y="100" text-anchor="middle" class="t">2D / Diagram</text><text x="185" y="120" text-anchor="middle" class="s">derived geometry</text>
+<rect x="80" y="260" width="210" height="70" rx="10" class="node green"/><text x="185" y="290" text-anchor="middle" class="t">3D / Renderer</text><text x="185" y="310" text-anchor="middle" class="s">derived visualization</text>
+<rect x="950" y="70" width="210" height="70" rx="10" class="node yellow"/><text x="1055" y="100" text-anchor="middle" class="t">Readouts / Reports</text><text x="1055" y="120" text-anchor="middle" class="s">derived presentation</text>
+<rect x="950" y="260" width="210" height="70" rx="10" class="node rose"/><text x="1055" y="290" text-anchor="middle" class="t">Task / Evaluation</text><text x="1055" y="310" text-anchor="middle" class="s">derived interpretation</text>
+<line x1="535" y1="165" x2="290" y2="115" stroke="#eb6a36" stroke-width="2"/><line x1="535" y1="235" x2="290" y2="295" stroke="#eb6a36" stroke-width="2"/><line x1="705" y1="165" x2="950" y2="115" stroke="#eb6a36" stroke-width="2"/><line x1="705" y1="235" x2="950" y2="295" stroke="#eb6a36" stroke-width="2"/>
+</svg></div>
+<div class="note-grid"><div class="card note"><h3>Use when</h3><p>同一 domain truth 有多種 representation：simulation、dashboard、editor、financial model、workflow app。</p></div><div class="card note"><h3>Failure smell</h3><p>不同 view 各自 copy calibration / unit / sign / business rule，最後 drift。</p></div></div>
+</section>
+
+<section class="pattern" id="p4">
+<div class="pattern-head"><div class="num">04</div><div><h2>Evidence Integrity</h2><p class="desc">Test pass 唔等於 claim 被證明。真正 evidence 必須令舊 defect 會 fail，而且唔可以由 reload、mock、injected value、proxy attribute 等 bypass 真實行為。</p></div><div class="tag">Evidence Funnel</div></div>
+<div class="card diagram"><svg viewBox="0 0 1240 380"><defs><marker id="arrowA" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#eb6a36"/></marker></defs>
+<rect x="55" y="55" width="245" height="72" rx="10" class="node blue"/><text x="178" y="84" text-anchor="middle" class="t">1 · Claim</text><text x="178" y="106" text-anchor="middle" class="s">what exactly is asserted?</text>
+<rect x="365" y="55" width="245" height="72" rx="10" class="node green"/><text x="488" y="84" text-anchor="middle" class="t">2 · Observable Evidence</text><text x="488" y="106" text-anchor="middle" class="s">what would actually prove it?</text>
+<rect x="675" y="55" width="245" height="72" rx="10" class="node yellow"/><text x="798" y="84" text-anchor="middle" class="t">3 · Falsifiability</text><text x="798" y="106" text-anchor="middle" class="s">would the old defect fail it?</text>
+<rect x="985" y="55" width="200" height="72" rx="10" class="node accent"/><text x="1085" y="84" text-anchor="middle" class="t">4 · Valid Evidence</text><text x="1085" y="106" text-anchor="middle" class="s">claim may be trusted</text>
+<path d="M300 91H365M610 91H675M920 91H985" class="flowA"/>
+<text x="55" y="200" class="s">COMMON INVALID SHORTCUTS</text>
+<rect x="55" y="225" width="250" height="80" rx="10" class="node rose"/><text x="180" y="255" text-anchor="middle" class="t">Reload bypass</text><text x="180" y="277" text-anchor="middle" class="s">does not prove lifecycle</text>
+<rect x="335" y="225" width="250" height="80" rx="10" class="node rose"/><text x="460" y="255" text-anchor="middle" class="t">Injected unreachable value</text><text x="460" y="277" text-anchor="middle" class="s">does not prove user reachability</text>
+<rect x="615" y="225" width="250" height="80" rx="10" class="node rose"/><text x="740" y="255" text-anchor="middle" class="t">Proxy attribute</text><text x="740" y="277" text-anchor="middle" class="s">does not prove internal state</text>
+<rect x="895" y="225" width="290" height="80" rx="10" class="node rose"/><text x="1040" y="255" text-anchor="middle" class="t">Weak metric / warning filter</text><text x="1040" y="277" text-anchor="middle" class="s">may hide the real defect</text>
+</svg></div>
+<div class="note-grid"><div class="card note"><h3>Key question</h3><p>「如果舊 bug 仲喺度，呢個 test 會唔會紅？」如果未必，就只係 activity，唔係證據。</p></div><div class="card note"><h3>Scope</h3><p>適用於 tests、manual validation、screenshots、metrics、review claims、completion reports。</p></div></div>
+</section>
+
+<section class="pattern" id="p5">
+<div class="pattern-head"><div class="num">05</div><div><h2>Repository-Centric Durable Context</h2><p class="desc">Repository 係 durable memory；handoff 只傳 current delta。避免每輪 prompt 複製整段歷史，令 context 愈滾愈大。</p></div><div class="tag">Context Pyramid</div></div>
+<div class="card diagram"><svg viewBox="0 0 1240 390"><polygon points="620,45 1040,330 200,330" fill="#fffdf9" stroke="#bebfb8" stroke-width="1.3"/>
+<polygon points="620,45 770,146 470,146" fill="#f7dfd4"/><text x="620" y="106" text-anchor="middle" class="t">Current Handoff</text><text x="620" y="127" text-anchor="middle" class="s">objective · delta · evidence · gaps · SHA</text>
+<polygon points="470,146 770,146 895,230 345,230" fill="#dce8f4"/><text x="620" y="190" text-anchor="middle" class="t">Current Work Navigation</text><text x="620" y="211" text-anchor="middle" class="s">CURRENT.md · PR metadata · focused logs</text>
+<polygon points="345,230 895,230 1040,330 200,330" fill="#dfeadf"/><text x="620" y="278" text-anchor="middle" class="t">Durable Repository Memory</text><text x="620" y="301" text-anchor="middle" class="s">code · tests · AGENTS.md · skills · ADR · commits</text>
+</svg></div>
+<div class="note-grid"><div class="card note"><h3>Why it matters</h3><p>減少 token bloat、stale context、copy-paste contradiction，亦方便 reviewer 由 repo 重新驗證。</p></div><div class="card note"><h3>Boundary</h3><p>`CURRENT.md` 係 reviewer navigation / implementation claim，唔係 authoritative source of truth。</p></div></div>
+</section>
+
+<section class="pattern" id="p6">
+<div class="pattern-head"><div class="num">06</div><div><h2>Separate Implementation Authority from Merge Authority</h2><p class="desc">做 implementation 嘅 agent 可以提供 evidence claim，但當要作 merge verdict 時，應由獨立 reviewer 重新看 actual diff、tests、PR head。</p></div><div class="tag">Swimlane Gate</div></div>
+<div class="card diagram"><svg viewBox="0 0 1240 360"><defs><marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#767984"/></marker><marker id="arrowA" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#eb6a36"/></marker></defs>
+<rect x="0" y="0" width="1240" height="150" fill="#fffdf9"/><rect x="0" y="150" width="1240" height="150" fill="#ecebe5"/>
+<text x="30" y="35" class="s">IMPLEMENTATION LANE</text><text x="30" y="185" class="s">REVIEW LANE</text>
+<rect x="110" y="60" width="220" height="70" rx="10" class="node blue"/><text x="220" y="89" text-anchor="middle" class="t">Implement Change</text><text x="220" y="111" text-anchor="middle" class="s">worker / specialist</text>
+<rect x="410" y="60" width="220" height="70" rx="10" class="node green"/><text x="520" y="89" text-anchor="middle" class="t">Claimed Evidence</text><text x="520" y="111" text-anchor="middle" class="s">tests · CURRENT.md · gaps</text>
+<rect x="710" y="205" width="220" height="70" rx="10" class="node yellow"/><text x="820" y="234" text-anchor="middle" class="t">Independent Inspection</text><text x="820" y="256" text-anchor="middle" class="s">actual diff · tests · current head</text>
+<rect x="990" y="205" width="180" height="70" rx="10" class="node accent"/><text x="1080" y="234" text-anchor="middle" class="t">Merge Verdict</text><text x="1080" y="256" text-anchor="middle" class="s">ready / minor / not ready</text>
+<path d="M330 95H410" class="flow"/><path d="M630 95H675Q690 95 690 115V220Q690 240 710 240" class="flowA"/><path d="M930 240H990" class="flowA"/>
+</svg></div>
+<div class="note-grid"><div class="card note"><h3>Use when</h3><p>PR 已經去到真實 merge decision，或者 regression risk 夠高，需要 challenge implementation claim。</p></div><div class="card note"><h3>Do not overuse</h3><p>Micro edit 同一般 focused local fix 唔應該強制跑獨立 reviewer。</p></div></div>
+</section>
+
+<section class="pattern" id="p7">
+<div class="pattern-head"><div class="num">07</div><div><h2>Fail-Closed VCS Operations</h2><p class="desc">Agent 做 Git publication 時唔靠 upstream / push.default 猜 destination；所有 branch、base、remote ref 都要 explicit，而且任何異常都 stop 而唔自動 repair。</p></div><div class="tag">Safety Sequence</div></div>
+<div class="card diagram"><svg viewBox="0 0 1240 390"><defs><marker id="arrowA" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#eb6a36"/></marker></defs>
+<rect x="40" y="64" width="170" height="70" rx="10" class="node blue"/><text x="125" y="92" text-anchor="middle" class="t">Explicit Branch</text><text x="125" y="114" text-anchor="middle" class="s">no-track from base</text>
+<rect x="250" y="64" width="170" height="70" rx="10" class="node green"/><text x="335" y="92" text-anchor="middle" class="t">Record main SHA</text><text x="335" y="114" text-anchor="middle" class="s">before publication</text>
+<rect x="460" y="64" width="190" height="70" rx="10" class="node yellow"/><text x="555" y="92" text-anchor="middle" class="t">Explicit Ref Push</text><text x="555" y="114" text-anchor="middle" class="s">HEAD:refs/heads/feature</text>
+<rect x="690" y="64" width="190" height="70" rx="10" class="node blue"/><text x="785" y="92" text-anchor="middle" class="t">Verify Feature Ref</text><text x="785" y="114" text-anchor="middle" class="s">remote == local HEAD</text>
+<rect x="920" y="64" width="250" height="70" rx="10" class="node accent"/><text x="1045" y="92" text-anchor="middle" class="t">Verify main Unchanged</text><text x="1045" y="114" text-anchor="middle" class="s">only then create PR</text>
+<path d="M210 99H250M420 99H460M650 99H690M880 99H920" class="flowA"/>
+<rect x="350" y="230" width="540" height="100" rx="12" class="node rose"/><text x="620" y="262" text-anchor="middle" class="t">Unexpected ref / divergence / main movement?</text><text x="620" y="287" text-anchor="middle" class="s">STOP · report state · do not reset · do not force-push</text>
+</svg></div>
+<div class="note-grid"><div class="card note"><h3>Principle</h3><p>Safety-sensitive VCS actions 應該 fail closed，而唔係估個最可能意圖再自動修。</p></div><div class="card note"><h3>Especially useful</h3><p>多 worktree、多 agent、parallel PR、production branch、automated PR publication。</p></div></div>
+</section>
+
+<section class="pattern" id="p8">
+<div class="pattern-head"><div class="num">08</div><div><h2>Integration ≠ Review ≠ Release</h2><p class="desc">`main` 可以持續吸收 integration，但 production 應由已 review、已選定嘅 release point 明確 promotion，而唔係「main 一郁 production 就跟住郁」。</p></div><div class="tag">Multi-Gate Model</div></div>
+<div class="card diagram"><svg viewBox="0 0 1240 360"><defs><marker id="arrowA" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#eb6a36"/></marker></defs>
+<rect x="50" y="70" width="190" height="70" rx="10" class="node blue"/><text x="145" y="98" text-anchor="middle" class="t">Feature PRs</text><text x="145" y="120" text-anchor="middle" class="s">parallel slices</text>
+<rect x="315" y="70" width="190" height="70" rx="10" class="node green"/><text x="410" y="98" text-anchor="middle" class="t">main</text><text x="410" y="120" text-anchor="middle" class="s">integration branch</text>
+<rect x="580" y="70" width="230" height="70" rx="10" class="node yellow"/><text x="695" y="98" text-anchor="middle" class="t">Known Release Point</text><text x="695" y="120" text-anchor="middle" class="s">reviewed SHA / release branch</text>
+<rect x="885" y="70" width="150" height="70" rx="10" class="node accent"/><text x="960" y="98" text-anchor="middle" class="t">Promote</text><text x="960" y="120" text-anchor="middle" class="s">explicit action</text>
+<rect x="1080" y="70" width="120" height="70" rx="10" class="node rose"/><text x="1140" y="98" text-anchor="middle" class="t">production</text><text x="1140" y="120" text-anchor="middle" class="s">release state</text>
+<path d="M240 105H315M505 105H580M810 105H885M1035 105H1080" class="flowA"/>
+<rect x="315" y="225" width="885" height="82" rx="12" class="node soft"/><text x="758" y="255" text-anchor="middle" class="t">main may keep moving while a release candidate is being validated</text><text x="758" y="279" text-anchor="middle" class="s">pin a releasable SHA / release branch instead of redefining release as current main</text>
+</svg></div>
+<div class="note-grid"><div class="card note"><h3>Benefit</h3><p>平行 PR 可以繼續 merge，又唔會逼 production 一定等全部大 PR 收尾先可 deploy。</p></div><div class="card note"><h3>Key separation</h3><p>Integration gate、merge/review gate、release/promotion gate 係三個唔同 decision。</p></div></div>
+</section>
+
+<section class="pattern" id="p9">
+<div class="pattern-head"><div class="num">09</div><div><h2>Freeze Accepted Areas</h2><p class="desc">一旦一個視覺、interaction、contract、API 或 architectural area 已被接受，就成為 constraint；下一輪只 expand 未完成範圍，除非需求明確 reopen。</p></div><div class="tag">State Loop</div></div>
+<div class="card diagram"><svg viewBox="0 0 1240 340"><defs><marker id="arrowA" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#eb6a36"/></marker></defs>
+<rect x="100" y="100" width="220" height="80" rx="10" class="node blue"/><text x="210" y="130" text-anchor="middle" class="t">Explore / Change</text><text x="210" y="154" text-anchor="middle" class="s">unsettled area</text>
+<rect x="405" y="100" width="220" height="80" rx="10" class="node yellow"/><text x="515" y="130" text-anchor="middle" class="t">Review / Accept</text><text x="515" y="154" text-anchor="middle" class="s">decision becomes explicit</text>
+<rect x="710" y="100" width="220" height="80" rx="10" class="node accent"/><text x="820" y="130" text-anchor="middle" class="t">Freeze</text><text x="820" y="154" text-anchor="middle" class="s">preserve accepted behaviour</text>
+<rect x="1015" y="100" width="150" height="80" rx="10" class="node green"/><text x="1090" y="130" text-anchor="middle" class="t">Expand</text><text x="1090" y="154" text-anchor="middle" class="s">next gap only</text>
+<path d="M320 140H405M625 140H710M930 140H1015" class="flowA"/>
+<text x="620" y="265" text-anchor="middle" class="s">reopen a frozen area only when a new explicit requirement justifies it</text>
+</svg></div>
+<div class="note-grid"><div class="card note"><h3>Design use</h3><p>避免 agent 每輪順手重新設計已確認 UI、hero、layout、interaction。</p></div><div class="card note"><h3>Engineering use</h3><p>對應 no proactive refactor / generalization / unrelated diagnostics；bug fix 唔應該偷偷擴大 scope。</p></div></div>
+</section>
+
+<section class="pattern" id="p10">
+<div class="pattern-head"><div class="num">10</div><div><h2>Route by Cognitive Dependency, Not File Ownership</h2><p class="desc">「touches a domain」唔等於「需要該 domain specialist」。只有當 task 真正依賴嗰個 domain 嘅 reasoning、invariant 或 shared contract 時先升級 specialist。</p></div><div class="tag">Decision Tree</div></div>
+<div class="card diagram"><svg viewBox="0 0 1240 390"><defs><marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#767984"/></marker><marker id="arrowA" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#eb6a36"/></marker></defs>
+<rect x="470" y="35" width="300" height="78" rx="10" class="node blue"/><text x="620" y="66" text-anchor="middle" class="t">Task touches domain X</text><text x="620" y="89" text-anchor="middle" class="s">file path alone is not enough</text>
+<polygon points="620,145 760,210 620,275 480,210" fill="#f7dfd4" stroke="#eb6a36" stroke-width="1.6"/><text x="620" y="200" text-anchor="middle" class="t">Requires domain reasoning,</text><text x="620" y="221" text-anchor="middle" class="t">invariant or shared contract?</text>
+<rect x="140" y="305" width="300" height="70" rx="10" class="node green"/><text x="290" y="333" text-anchor="middle" class="t">NO → Keep smallest harness</text><text x="290" y="355" text-anchor="middle" class="s">local inspection / minimal edit</text>
+<rect x="800" y="305" width="300" height="70" rx="10" class="node accent"/><text x="950" y="333" text-anchor="middle" class="t">YES → Load specialist</text><text x="950" y="355" text-anchor="middle" class="s">only the skill needed for reasoning</text>
+<path d="M620 113V145" class="flowA"/><path d="M505 245L350 305" class="flow"/><path d="M735 245L890 305" class="flowA"/>
+</svg></div>
+<div class="note-grid"><div class="card note"><h3>Example</h3><p>改 renderer-adjacent component 入面一個 label ≠ renderer specialist；改 render-target ownership = renderer specialist。</p></div><div class="card note"><h3>Result</h3><p>減少 orchestration ceremony、context cost 同 specialist overuse，同時保留真正 contract-change 時嘅深度。</p></div></div>
+</section>
+
+<section class="summary">
+<div class="pattern-head"><div class="num">→</div><div><h2>Kickstart Operating Model</h2><p class="desc">將十個 pattern 串埋，就形成一條由 intent 去到 release 嘅 AI-native project lifecycle。</p></div><div class="tag">Lifecycle Summary</div></div>
+<table><thead><tr><th>Stage</th><th>Question</th><th>Pattern</th></tr></thead><tbody>
+<tr><td>Direction</td><td>今次真正要交付乜？</td><td>01 Spec as guardrail + current repo truth</td></tr>
+<tr><td>Delivery</td><td>最細 coherent outcome 係乜？</td><td>02 Vertical Slice + 09 Freeze Accepted Areas</td></tr>
+<tr><td>Architecture</td><td>邊份 state / contract 係 authoritative？</td><td>03 Canonical State</td></tr>
+<tr><td>Execution</td><td>需要幾重 agent machinery？</td><td>10 Cognitive Routing</td></tr>
+<tr><td>Context</td><td>agent 應該讀乜，而唔係重播成個歷史？</td><td>05 Durable Context</td></tr>
+<tr><td>Proof</td><td>我哋憑乜嘢相信 claim？</td><td>04 Evidence Integrity</td></tr>
+<tr><td>Merge</td><td>邊個有權作最終 verdict？</td><td>06 Independent Merge Gate</td></tr>
+<tr><td>Git</td><td>publication 出錯時係咪會安全停低？</td><td>07 Fail-Closed VCS</td></tr>
+<tr><td>Release</td><td>merge 係咪等於 deploy？</td><td>08 Release Promotion</td></tr>
+</tbody></table>
+</section>
+
+<footer><div>Human-facing pattern atlas · self-contained HTML · inline SVG/CSS · no JavaScript</div><div>Designed for project kickstart, onboarding and architecture review</div></footer>
+</main>
+</body>
+</html>
