@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>MacSmoke</AssemblyName>
+    <RootNamespace>MeetingEvidenceRecorder.MacSmoke</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/MeetingEvidenceRecorder.Application/MeetingEvidenceRecorder.Application.csproj" />
+    <ProjectReference Include="../../src/MeetingEvidenceRecorder.Core/MeetingEvidenceRecorder.Core.csproj" />
+    <ProjectReference Include="../../src/MeetingEvidenceRecorder.Infrastructure/MeetingEvidenceRecorder.Infrastructure.csproj" />
+    <ProjectReference Include="../../src/MeetingEvidenceRecorder.Platform.MacOS/MeetingEvidenceRecorder.Platform.MacOS.csproj" />
+  </ItemGroup>
+  <Target Name="CopyMacCaptureShimToSmokeOutput" AfterTargets="Build"
+          Condition="'$(OS)' == 'Unix'">
+    <ItemGroup>
+      <NativeCaptureShim Include="../../src/MeetingEvidenceRecorder.Platform.MacOS/bin/$(Configuration)/$(TargetFramework)/**/libMeetingEvidenceRecorderMacCapture.dylib" />
+    </ItemGroup>
+    <Copy SourceFiles="@(NativeCaptureShim)" DestinationFolder="$(OutputPath)" />
+  </Target>
+</Project>

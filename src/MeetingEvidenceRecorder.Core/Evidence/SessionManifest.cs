@@ -47,7 +47,7 @@ public sealed record AudioMetadata
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? Microphone { get; init; }
     public string? MicrophoneDevice { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? OutputMode { get; init; }
-    public int? SampleRate { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? SampleRate { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? SystemAudioCaptureMode { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? SynchronizedToRecordingTimeline { get; init; }
     [JsonExtensionData] public Dictionary<string, JsonElement>? Extensions { get; init; }

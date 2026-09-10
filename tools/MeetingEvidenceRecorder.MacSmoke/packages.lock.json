@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "meetingevidencerecorder.application": {
+        "type": "Project",
+        "dependencies": {
+          "MeetingEvidenceRecorder.Core": "[1.0.0, )"
+        }
+      },
+      "meetingevidencerecorder.core": {
+        "type": "Project"
+      },
+      "meetingevidencerecorder.infrastructure": {
+        "type": "Project",
+        "dependencies": {
+          "MeetingEvidenceRecorder.Application": "[1.0.0, )",
+          "MeetingEvidenceRecorder.Core": "[1.0.0, )"
+        }
+      },
+      "meetingevidencerecorder.platform.macos": {
+        "type": "Project",
+        "dependencies": {
+          "MeetingEvidenceRecorder.Core": "[1.0.0, )"
+        }
+      }
+    }
+  }
+}

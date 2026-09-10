@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../MeetingEvidenceRecorder.Core/MeetingEvidenceRecorder.Core.csproj" />
+    <None Include="Native/mer_capture.m" />
+  </ItemGroup>
+  <Target Name="BuildMacCaptureShim"
+          BeforeTargets="Build"
+          Condition="'$(OS)' == 'Unix' And Exists('/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk')">
+    <PropertyGroup>
+      <MacCaptureLibrary>$(IntermediateOutputPath)libMeetingEvidenceRecorderMacCapture.dylib</MacCaptureLibrary>
+    </PropertyGroup>
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <Exec Command="xcrun clang -fobjc-arc -fblocks -dynamiclib -O2 -mmacosx-version-min=15.0 -framework Foundation -framework AppKit -framework CoreGraphics -framework CoreMedia -framework CoreVideo -framework AudioToolbox -framework ScreenCaptureKit -I &quot;$(MSBuildProjectDirectory)/Native&quot; &quot;$(MSBuildProjectDirectory)/Native/mer_capture.m&quot; -o &quot;$(MacCaptureLibrary)&quot;" />
+    <Copy SourceFiles="$(MacCaptureLibrary)" DestinationFolder="$(OutputPath)" />
+  </Target>
+  <Target Name="CopyMacCaptureShimToDependents" AfterTargets="Build"
+          Condition="'$(OS)' == 'Unix' And Exists('$(IntermediateOutputPath)libMeetingEvidenceRecorderMacCapture.dylib')">
+    <ItemGroup>
+      <MacCaptureShim Include="$(IntermediateOutputPath)libMeetingEvidenceRecorderMacCapture.dylib" />
+    </ItemGroup>
+    <Copy SourceFiles="@(MacCaptureShim)" DestinationFolder="$(OutputPath)" />
+  </Target>
+</Project>
