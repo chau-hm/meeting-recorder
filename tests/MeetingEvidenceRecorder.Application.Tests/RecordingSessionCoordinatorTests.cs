@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 using MeetingEvidenceRecorder.Application.Recording;
 using MeetingEvidenceRecorder.Core.Abstractions;
 using MeetingEvidenceRecorder.Core.Capture;
@@ -24,18 +25,35 @@ public sealed class RecordingSessionCoordinatorTests
 
         await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
         Assert.Equal(RecordingState.Recording, coordinator.State);
+        var activeManifests = store.Store!.ActiveManifests
+            .Where(manifest => manifest.Status is SessionStatus.Initializing or SessionStatus.Recording)
+            .ToArray();
+        Assert.Equal(2, activeManifests.Length);
+        Assert.All(
+            activeManifests,
+            manifest =>
+            {
+                Assert.Null(manifest.Recording.Audio.SystemAudio);
+                Assert.Null(manifest.Recording.Audio.OutputMode);
+                Assert.Null(manifest.Recording.Audio.SampleRate);
+            });
 
         var completion = await coordinator.StopAsync(CancellationToken.None);
 
         Assert.Equal(RecordingState.Completed, completion.State);
         Assert.Equal(TimeSpan.FromSeconds(2), completion.Duration);
+        Assert.Null(completion.Error);
         Assert.True(store.Store!.Committed);
+        Assert.True(store.Store.CommittedManifest!.Recording.Audio.SystemAudio);
+        Assert.False(store.Store.CommittedManifest.Recording.Audio.Microphone);
+        Assert.Equal("system_audio_only", store.Store.CommittedManifest.Recording.Audio.OutputMode);
+        Assert.Equal(48000, store.Store.CommittedManifest.Recording.Audio.SampleRate);
         Assert.Contains("capture-stop", log);
         Assert.Contains("writer-finalize", log);
     }
 
     [Fact]
-    public async Task PermissionFailureNeverEntersRecording()
+    public async Task PermissionFailureNeverEntersRecordingOrClaimsSystemAudio()
     {
         var capture = new FakeCapture([]);
         capture.Permission = PermissionStatus.Denied;
@@ -55,6 +73,8 @@ public sealed class RecordingSessionCoordinatorTests
         Assert.False(capture.Started);
         Assert.True(writer.Disposed);
         Assert.True(store.Store!.MarkedIncomplete);
+        Assert.Null(store.Store.IncompleteManifest!.Recording.Audio.SystemAudio);
+        Assert.True(coordinator.Completion.IsCompletedSuccessfully);
     }
 
     [Fact]
@@ -78,6 +98,28 @@ public sealed class RecordingSessionCoordinatorTests
         Assert.Equal("AUDIO_SYSTEM_UNAVAILABLE", exception.Error.Code);
         Assert.Equal(RecordingState.Failed, coordinator.State);
         Assert.False(capture.Started);
+    }
+
+    [Fact]
+    public async Task StopWithoutAnInitialAudioSampleTerminatesIncomplete()
+    {
+        var capture = new FakeCapture([]);
+        var store = new FakeBundleStoreFactory([]);
+        await using var coordinator = new RecordingSessionCoordinator(
+            capture,
+            new FakeMediaWriter([]),
+            store,
+            new FakeClock());
+
+        await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
+        capture.EmitVideo();
+
+        var completion = await coordinator.StopAsync(CancellationToken.None);
+
+        Assert.Equal(RecordingState.Incomplete, completion.State);
+        Assert.Equal("AUDIO_SYSTEM_UNAVAILABLE", completion.Error!.Code);
+        Assert.Equal(1, capture.StopCalls);
+        Assert.Null(store.Store!.IncompleteManifest!.Recording.Audio.SystemAudio);
     }
 
     [Fact]
@@ -117,8 +159,10 @@ public sealed class RecordingSessionCoordinatorTests
         var completion = await coordinator.StopAsync(CancellationToken.None);
 
         Assert.Equal(RecordingState.Incomplete, completion.State);
+        Assert.Equal("MEDIA_PIPELINE_FAILED", completion.Error!.Code);
         Assert.True(store.Store!.MarkedIncomplete);
         Assert.Contains("writer-dispose", log);
+        Assert.Null(store.Store.IncompleteManifest!.Recording.Audio.SystemAudio);
     }
 
     [Fact]
@@ -141,6 +185,179 @@ public sealed class RecordingSessionCoordinatorTests
         Assert.Equal(RecordingState.Incomplete, completion.State);
         Assert.True(store.Store!.MarkedIncomplete);
         Assert.False(store.Store.Committed);
+        Assert.True(store.Store.IncompleteManifest!.Recording.Audio.SystemAudio);
+    }
+
+    [Fact]
+    public async Task FatalCaptureErrorAutomaticallyTerminatesRecording()
+    {
+        var log = new List<string>();
+        var capture = new FakeCapture(log);
+        var writer = new FakeMediaWriter(log);
+        var store = new FakeBundleStoreFactory(log);
+        await using var coordinator = new RecordingSessionCoordinator(
+            capture,
+            writer,
+            store,
+            new FakeClock());
+
+        await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
+        capture.RaiseError(new RecorderError(
+            "CAPTURE_SOURCE_LOST",
+            RecorderErrorSeverity.Fatal,
+            "The selected display is no longer available.",
+            "Synthetic source loss."));
+
+        var completion = await coordinator.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(RecordingState.Incomplete, completion.State);
+        Assert.Equal("CAPTURE_SOURCE_LOST", completion.Error!.Code);
+        Assert.Equal(RecordingState.Incomplete, coordinator.State);
+        Assert.Equal(1, capture.StopCalls);
+        Assert.True(writer.Disposed);
+        Assert.True(store.Store!.MarkedIncomplete);
+        Assert.Null(store.Store.IncompleteManifest!.Recording.Audio.SystemAudio);
+    }
+
+    [Fact]
+    public async Task VideoWriterFailureAutomaticallyTerminatesRecording()
+    {
+        var capture = new FakeCapture([]);
+        var writer = new FakeMediaWriter([])
+        {
+            VideoWriteFailure = new InvalidOperationException("Synthetic video pipe failure.")
+        };
+        var store = new FakeBundleStoreFactory([]);
+        await using var coordinator = new RecordingSessionCoordinator(
+            capture,
+            writer,
+            store,
+            new FakeClock());
+
+        await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
+        capture.EmitVideo();
+        capture.EmitAudio();
+
+        var completion = await coordinator.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(RecordingState.Incomplete, completion.State);
+        Assert.Equal("MEDIA_PIPELINE_FAILED", completion.Error!.Code);
+        Assert.Equal(1, capture.StopCalls);
+        Assert.True(writer.Disposed);
+        Assert.True(store.Store!.MarkedIncomplete);
+    }
+
+    [Fact]
+    public async Task AudioWriterFailureAutomaticallyTerminatesRecording()
+    {
+        var capture = new FakeCapture([]);
+        var writer = new FakeMediaWriter([])
+        {
+            AudioWriteFailure = new InvalidOperationException("Synthetic audio pipe failure.")
+        };
+        var store = new FakeBundleStoreFactory([]);
+        await using var coordinator = new RecordingSessionCoordinator(
+            capture,
+            writer,
+            store,
+            new FakeClock());
+
+        await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
+        capture.EmitVideo();
+        capture.EmitAudio();
+
+        var completion = await coordinator.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(RecordingState.Incomplete, completion.State);
+        Assert.Equal("MEDIA_PIPELINE_FAILED", completion.Error!.Code);
+        Assert.Equal(1, capture.StopCalls);
+        Assert.True(writer.Disposed);
+        Assert.True(store.Store!.MarkedIncomplete);
+    }
+
+    [Fact]
+    public async Task MultipleSimultaneousFailuresUseOneShutdownAndKeepFirstCause()
+    {
+        var capture = new FakeCapture([]);
+        var writer = new FakeMediaWriter([])
+        {
+            VideoWriteFailure = new InvalidOperationException("Synthetic video pipe failure."),
+            AudioWriteFailure = new InvalidOperationException("Synthetic audio pipe failure.")
+        };
+        var store = new FakeBundleStoreFactory([]);
+        await using var coordinator = new RecordingSessionCoordinator(
+            capture,
+            writer,
+            store,
+            new FakeClock());
+
+        await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
+        capture.EmitVideo();
+        capture.EmitAudio();
+        capture.RaiseError(new RecorderError(
+            "CAPTURE_SOURCE_LOST",
+            RecorderErrorSeverity.Fatal,
+            "The selected display is no longer available.",
+            "Synthetic source loss."));
+
+        var completion = await coordinator.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(RecordingState.Incomplete, completion.State);
+        Assert.Equal(1, capture.StopCalls);
+        Assert.Equal(1, writer.DisposeCalls);
+        Assert.Equal("CAPTURE_SOURCE_LOST", completion.Error!.Code);
+        Assert.Contains(completion.Diagnostics, item => item.Contains("CAPTURE_SOURCE_LOST", StringComparison.Ordinal));
+
+        var repeatedStop = await coordinator.StopAsync(CancellationToken.None);
+        Assert.Equal(completion, repeatedStop);
+    }
+
+    [Fact]
+    public async Task VideoCallbackFirstStillPreservesEarlierAudioTimestamp()
+    {
+        var capture = new FakeCapture([]);
+        var writer = new FakeMediaWriter([]);
+        await using var coordinator = new RecordingSessionCoordinator(
+            capture,
+            writer,
+            new FakeBundleStoreFactory([]),
+            new FakeClock());
+
+        await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
+        capture.EmitVideo(new NativeTimestamp(10020, 1000));
+        capture.EmitAudio(new NativeTimestamp(10000, 1000));
+        await Task.WhenAll(
+            writer.VideoWriteEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)),
+            writer.AudioWriteEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        await coordinator.StopAsync(CancellationToken.None);
+
+        Assert.Equal(TimeSpan.FromMilliseconds(20), writer.VideoTimestamps.Single());
+        Assert.Equal(TimeSpan.Zero, writer.AudioTimestamps.Single());
+    }
+
+    [Fact]
+    public async Task AudioCallbackFirstStillPreservesEarlierVideoTimestamp()
+    {
+        var capture = new FakeCapture([]);
+        var writer = new FakeMediaWriter([]);
+        await using var coordinator = new RecordingSessionCoordinator(
+            capture,
+            writer,
+            new FakeBundleStoreFactory([]),
+            new FakeClock());
+
+        await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
+        capture.EmitAudio(new NativeTimestamp(10020, 1000));
+        capture.EmitVideo(new NativeTimestamp(10000, 1000));
+        await Task.WhenAll(
+            writer.VideoWriteEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)),
+            writer.AudioWriteEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        await coordinator.StopAsync(CancellationToken.None);
+
+        Assert.Equal(TimeSpan.Zero, writer.VideoTimestamps.Single());
+        Assert.Equal(TimeSpan.FromMilliseconds(20), writer.AudioTimestamps.Single());
     }
 
     [Fact]
@@ -189,15 +406,16 @@ public sealed class RecordingSessionCoordinatorTests
     {
         private readonly CaptureSource source =
             new("display-1", "Display 1", CaptureSourceKind.Display, 2, 2);
+        private readonly Channel<VideoFrame> videoFrames = Channel.CreateUnbounded<VideoFrame>();
+        private readonly Channel<AudioFrame> audioFrames = Channel.CreateUnbounded<AudioFrame>();
+        private long sequence;
 
-        public event EventHandler<RecorderErrorEventArgs>? Error
-        {
-            add { }
-            remove { }
-        }
+        public event EventHandler<RecorderErrorEventArgs>? Error;
+
         public PermissionStatus Permission { get; set; } = PermissionStatus.Granted;
         public Exception? StartFailure { get; set; }
         public bool Started { get; private set; }
+        public int StopCalls { get; private set; }
         public long DroppedVideoFrames => 0;
         public NativeTimestamp? SourceTimestampOrigin => null;
 
@@ -214,10 +432,11 @@ public sealed class RecordingSessionCoordinatorTests
             Task.FromResult<IReadOnlyList<CaptureSource>>([source]);
 
         public Task StartAsync(
-            CaptureSource selectedSource,
+            CaptureSource requestedSource,
             VideoCaptureOptions options,
             CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (StartFailure is not null)
                 return Task.FromException(StartFailure);
 
@@ -228,42 +447,54 @@ public sealed class RecordingSessionCoordinatorTests
         public async IAsyncEnumerable<VideoFrame> ReadFramesAsync(
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            yield return new VideoFrame(
-                1,
-                new NativeTimestamp(10, 10),
-                new byte[16],
-                new VideoFormat(2, 2, 30));
-            await Task.CompletedTask;
+            await foreach (var frame in videoFrames.Reader.ReadAllAsync(cancellationToken))
+                yield return frame;
         }
 
         public async IAsyncEnumerable<AudioFrame> ReadSystemAudioAsync(
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            yield return new AudioFrame(
-                AudioSourceKind.System,
-                new NativeTimestamp(10, 10),
-                1,
-                new float[2],
-                new AudioFormat(48000, 2));
-            await Task.CompletedTask;
+            await foreach (var frame in audioFrames.Reader.ReadAllAsync(cancellationToken))
+                yield return frame;
         }
 
         public Task StopAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            StopCalls++;
             if (Started)
             {
                 Started = false;
                 log.Add("capture-stop");
             }
 
+            videoFrames.Writer.TryComplete();
+            audioFrames.Writer.TryComplete();
             return Task.CompletedTask;
         }
 
+        public void EmitVideo(NativeTimestamp? timestamp = null) =>
+            videoFrames.Writer.TryWrite(new VideoFrame(
+                Interlocked.Increment(ref sequence),
+                timestamp ?? new NativeTimestamp(10, 1),
+                new byte[16],
+                new VideoFormat(2, 2, 30)));
+
+        public void EmitAudio(NativeTimestamp? timestamp = null) =>
+            audioFrames.Writer.TryWrite(new AudioFrame(
+                AudioSourceKind.System,
+                timestamp ?? new NativeTimestamp(10, 1),
+                1,
+                new float[2],
+                new AudioFormat(48000, 2)));
+
+        public void RaiseError(RecorderError error) =>
+            Error?.Invoke(this, new RecorderErrorEventArgs(error));
+
         public ValueTask DisposeAsync()
         {
+            videoFrames.Writer.TryComplete();
+            audioFrames.Writer.TryComplete();
             return ValueTask.CompletedTask;
         }
     }
@@ -271,9 +502,18 @@ public sealed class RecordingSessionCoordinatorTests
     private sealed class FakeMediaWriter(List<string> log) : IMediaWriter
     {
         public Exception? InitializeFailure { get; set; }
+        public Exception? VideoWriteFailure { get; set; }
+        public Exception? AudioWriteFailure { get; set; }
         public Exception? FinalizeFailure { get; set; }
         public bool Initialized { get; private set; }
         public bool Disposed { get; private set; }
+        public int DisposeCalls { get; private set; }
+        public TaskCompletionSource<bool> VideoWriteEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> AudioWriteEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public List<TimeSpan> VideoTimestamps { get; } = [];
+        public List<TimeSpan> AudioTimestamps { get; } = [];
 
         public Task InitializeAsync(MediaWriterConfiguration configuration, CancellationToken cancellationToken)
         {
@@ -284,13 +524,33 @@ public sealed class RecordingSessionCoordinatorTests
             return Task.CompletedTask;
         }
 
-        public ValueTask WriteVideoAsync(TimedVideoFrame frame, CancellationToken cancellationToken) =>
-            ValueTask.CompletedTask;
+        public async ValueTask WriteVideoAsync(
+            TimedVideoFrame frame,
+            CancellationToken cancellationToken)
+        {
+            VideoWriteEntered.TrySetResult(true);
+            if (VideoWriteFailure is not null)
+                throw VideoWriteFailure;
+            cancellationToken.ThrowIfCancellationRequested();
+            VideoTimestamps.Add(frame.RecordingTimestamp);
+            await Task.CompletedTask;
+        }
 
-        public ValueTask WriteAudioAsync(TimedAudioFrame frame, CancellationToken cancellationToken) =>
-            ValueTask.CompletedTask;
+        public async ValueTask WriteAudioAsync(
+            TimedAudioFrame frame,
+            CancellationToken cancellationToken)
+        {
+            AudioWriteEntered.TrySetResult(true);
+            if (AudioWriteFailure is not null)
+                throw AudioWriteFailure;
+            cancellationToken.ThrowIfCancellationRequested();
+            AudioTimestamps.Add(frame.RecordingTimestamp);
+            await Task.CompletedTask;
+        }
 
-        public Task<FinalizedMedia> FinalizeAsync(CancellationToken cancellationToken)
+        public Task<FinalizedMedia> FinalizeAsync(
+            TimeSpan recordingEnd,
+            CancellationToken cancellationToken)
         {
             if (FinalizeFailure is not null)
                 return Task.FromException<FinalizedMedia>(FinalizeFailure);
@@ -298,7 +558,7 @@ public sealed class RecordingSessionCoordinatorTests
             log.Add("writer-finalize");
             return Task.FromResult(new FinalizedMedia(
                 "recording.mp4",
-                TimeSpan.FromSeconds(2),
+                recordingEnd,
                 new VideoFormat(2, 2, 30),
                 new AudioFormat(48000, 2),
                 HasVideo: true,
@@ -307,11 +567,13 @@ public sealed class RecordingSessionCoordinatorTests
 
         public ValueTask DisposeAsync()
         {
+            DisposeCalls++;
             if (!Disposed)
             {
                 Disposed = true;
                 log.Add("writer-dispose");
             }
+
             return ValueTask.CompletedTask;
         }
     }
@@ -338,9 +600,13 @@ public sealed class RecordingSessionCoordinatorTests
         public string Root => "test-bundle";
         public bool Committed { get; private set; }
         public bool MarkedIncomplete { get; private set; }
+        public SessionManifest? CommittedManifest { get; private set; }
+        public SessionManifest? IncompleteManifest { get; private set; }
+        public List<SessionManifest> ActiveManifests { get; } = [];
 
         public void WriteActive(SessionManifest manifest)
         {
+            ActiveManifests.Add(manifest);
         }
 
         public void AppendEvent(RecordingEvent entry)
@@ -349,11 +615,16 @@ public sealed class RecordingSessionCoordinatorTests
 
         public IReadOnlyList<BundleDiagnostic> CommitCompleted(SessionManifest finalizingManifest)
         {
+            CommittedManifest = finalizingManifest;
             Committed = !commitDiagnostics.Any(item => item.Severity == DiagnosticSeverity.Error);
             return commitDiagnostics;
         }
 
-        public void MarkIncomplete(SessionManifest manifest) => MarkedIncomplete = true;
+        public void MarkIncomplete(SessionManifest manifest)
+        {
+            IncompleteManifest = manifest;
+            MarkedIncomplete = true;
+        }
 
         public ValueTask DisposeAsync()
         {
@@ -362,6 +633,7 @@ public sealed class RecordingSessionCoordinatorTests
                 Disposed = true;
                 log.Add("store-dispose");
             }
+
             return ValueTask.CompletedTask;
         }
 

@@ -19,6 +19,7 @@ public sealed class FfmpegMediaWriter : IMediaWriter
 {
     private readonly string ffmpegPath;
     private readonly string ffprobePath;
+    private readonly SemaphoreSlim writeGate = new(1, 1);
     private MediaWriterConfiguration? configuration;
     private FileStream? videoPipe;
     private FileStream? audioPipe;
@@ -70,6 +71,21 @@ public sealed class FfmpegMediaWriter : IMediaWriter
 
     public async ValueTask WriteVideoAsync(TimedVideoFrame timedFrame, CancellationToken cancellationToken)
     {
+        await writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await WriteVideoCoreAsync(timedFrame, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    private async ValueTask WriteVideoCoreAsync(
+        TimedVideoFrame timedFrame,
+        CancellationToken cancellationToken)
+    {
         EnsureReady();
         var frame = timedFrame.Frame;
         var expectedBytes = checked(frame.Format.Width * frame.Format.Height * 4);
@@ -97,6 +113,21 @@ public sealed class FfmpegMediaWriter : IMediaWriter
 
     public async ValueTask WriteAudioAsync(TimedAudioFrame timedFrame, CancellationToken cancellationToken)
     {
+        await writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await WriteAudioCoreAsync(timedFrame, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    private async ValueTask WriteAudioCoreAsync(
+        TimedAudioFrame timedFrame,
+        CancellationToken cancellationToken)
+    {
         EnsureReady();
         var frame = timedFrame.Frame;
         var channels = configuration!.AudioFormat.Channels;
@@ -108,15 +139,24 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         var targetSample = Math.Max(0, (long)Math.Round(
             timedFrame.RecordingTimestamp.TotalSeconds * frame.Format.SampleRate,
             MidpointRounding.AwayFromZero));
+        var audioStartSample = Math.Max(nextAudioSample, targetSample);
+        var skipSamples = Math.Max(0, nextAudioSample - targetSample);
+        if (skipSamples >= frame.SampleCount)
+            return;
+
+        var acceptedSampleCount = frame.SampleCount - skipSamples;
+        var audioEndSample = checked(audioStartSample + acceptedSampleCount);
+        if (hasVideo)
+        {
+            await ExtendVideoToAudioEndAsync(audioEndSample, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         if (targetSample > nextAudioSample)
         {
             await WriteSilenceAsync(targetSample - nextAudioSample, cancellationToken).ConfigureAwait(false);
             nextAudioSample = targetSample;
         }
-
-        var skipSamples = Math.Max(0, nextAudioSample - targetSample);
-        if (skipSamples >= frame.SampleCount)
-            return;
 
         var samplesToWrite = frame.Samples
             .Slice(checked((int)(skipSamples * channels)), checked((frame.SampleCount - (int)skipSamples) * channels));
@@ -126,16 +166,36 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         hasAudio = true;
     }
 
-    public async Task<FinalizedMedia> FinalizeAsync(CancellationToken cancellationToken)
+    public async Task<FinalizedMedia> FinalizeAsync(
+        TimeSpan recordingEnd,
+        CancellationToken cancellationToken)
+    {
+        await writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await FinalizeCoreAsync(recordingEnd, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    private async Task<FinalizedMedia> FinalizeCoreAsync(
+        TimeSpan recordingEnd,
+        CancellationToken cancellationToken)
     {
         EnsureReady();
         if (finalized)
             throw new InvalidOperationException("The media writer has already been finalized.");
+        if (recordingEnd < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(recordingEnd), "Recording end cannot be negative.");
         if (!hasVideo)
             throw new MediaWriterException("MEDIA_ENCODER_FAILED", "No video frames were accepted.");
         if (!hasAudio)
             throw new MediaWriterException("AUDIO_SYSTEM_UNAVAILABLE", "No system-audio samples were accepted.");
 
+        await ExtendInputsToRecordingEndAsync(recordingEnd, cancellationToken).ConfigureAwait(false);
         finalized = true;
         await CloseInputPipesAsync().ConfigureAwait(false);
         await encoder!.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
@@ -167,6 +227,53 @@ public sealed class FfmpegMediaWriter : IMediaWriter
             configuration.AudioFormat with { SampleRate = sampleRate },
             result.HasVideo,
             result.HasAudio);
+    }
+
+    private async Task ExtendInputsToRecordingEndAsync(
+        TimeSpan recordingEnd,
+        CancellationToken cancellationToken)
+    {
+        var videoEnd = TimeSpan.FromSeconds(
+            nextVideoFrame / configuration!.VideoFormat.FramesPerSecond);
+        var audioEnd = TimeSpan.FromSeconds(
+            (double)nextAudioSample / configuration.AudioFormat.SampleRate);
+        var targetEnd = new[]
+        {
+            recordingEnd,
+            videoEnd,
+            audioEnd
+        }.Max();
+
+        await ExtendVideoToTimeAsync(targetEnd, cancellationToken).ConfigureAwait(false);
+
+        var targetAudioSamples = checked((long)Math.Ceiling(
+            targetEnd.TotalSeconds * configuration.AudioFormat.SampleRate));
+        if (targetAudioSamples > nextAudioSample)
+        {
+            await WriteSilenceAsync(targetAudioSamples - nextAudioSample, cancellationToken)
+                .ConfigureAwait(false);
+            nextAudioSample = targetAudioSamples;
+        }
+    }
+
+    private Task ExtendVideoToAudioEndAsync(
+        long audioEndSample,
+        CancellationToken cancellationToken) =>
+        ExtendVideoToTimeAsync(
+            TimeSpan.FromSeconds((double)audioEndSample / configuration!.AudioFormat.SampleRate),
+            cancellationToken);
+
+    private async Task ExtendVideoToTimeAsync(
+        TimeSpan targetEnd,
+        CancellationToken cancellationToken)
+    {
+        var targetVideoFrames = checked((long)Math.Ceiling(
+            targetEnd.TotalSeconds * configuration!.VideoFormat.FramesPerSecond));
+        while (nextVideoFrame < targetVideoFrames)
+        {
+            await videoPipe!.WriteAsync(lastVideoFrame!, cancellationToken).ConfigureAwait(false);
+            nextVideoFrame++;
+        }
     }
 
     private Process StartEncoder(string videoFifo, string audioFifo)

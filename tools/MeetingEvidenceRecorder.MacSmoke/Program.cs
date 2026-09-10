@@ -147,7 +147,19 @@ internal static class MacSmokeProgram
         Console.CancelKeyPress += cancelHandler;
         try
         {
-            await Task.Delay(TimeSpan.FromSeconds(durationSeconds), stop.Token).ConfigureAwait(false);
+            var requestedDuration = Task.Delay(TimeSpan.FromSeconds(durationSeconds), stop.Token);
+            var terminalCompletion = coordinator.Completion;
+            var firstTerminal = await Task.WhenAny(
+                requestedDuration,
+                terminalCompletion).ConfigureAwait(false);
+            if (firstTerminal == terminalCompletion)
+            {
+                var failureCompletion = await terminalCompletion.ConfigureAwait(false);
+                PrintCompletion(failureCompletion);
+                return failureCompletion.State == RecordingState.Completed ? 0 : 5;
+            }
+
+            await requestedDuration.ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (stop.IsCancellationRequested)
         {
@@ -159,12 +171,22 @@ internal static class MacSmokeProgram
 
         Console.WriteLine("Stopping and validating media...");
         var completion = await coordinator.StopAsync(CancellationToken.None).ConfigureAwait(false);
+        PrintCompletion(completion);
+        return completion.State == RecordingState.Completed ? 0 : 5;
+    }
+
+    private static void PrintCompletion(RecordingCompletion completion)
+    {
         Console.WriteLine($"State: {completion.State}");
         Console.WriteLine($"Bundle: {completion.BundlePath}");
+        if (completion.Error is RecorderError error)
+        {
+            Console.Error.WriteLine($"{error.Code}: {error.UserMessage}");
+            Console.Error.WriteLine(error.DiagnosticMessage);
+        }
         if (completion.Diagnostics.Count > 0)
             foreach (var diagnostic in completion.Diagnostics)
                 Console.WriteLine($"Diagnostic: {diagnostic}");
-        return completion.State == RecordingState.Completed ? 0 : 5;
     }
 
     private static async Task<int> ListDisplaysAsync(MacScreenCaptureBackend capture)

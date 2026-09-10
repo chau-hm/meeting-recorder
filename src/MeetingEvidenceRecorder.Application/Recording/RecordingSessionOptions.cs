@@ -1,3 +1,4 @@
+using MeetingEvidenceRecorder.Core.Abstractions;
 using MeetingEvidenceRecorder.Core.Capture;
 
 namespace MeetingEvidenceRecorder.Application.Recording;
@@ -12,4 +13,5 @@ public sealed record RecordingCompletion(
     string BundlePath,
     RecordingState State,
     TimeSpan? Duration,
-    IReadOnlyList<string> Diagnostics);
+    IReadOnlyList<string> Diagnostics,
+    RecorderError? Error = null);

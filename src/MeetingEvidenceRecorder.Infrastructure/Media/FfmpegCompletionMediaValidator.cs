@@ -5,9 +5,11 @@ namespace MeetingEvidenceRecorder.Infrastructure.Media;
 
 public sealed class FfmpegCompletionMediaValidator : ICompletionMediaValidator
 {
-    private readonly FfmpegMediaProbe probe;
+    // H.264/AAC packetization can move reported stream boundaries by a few packets.
+    private static readonly TimeSpan StreamCoverageTolerance = TimeSpan.FromMilliseconds(750);
+    private readonly IMediaProbe probe;
 
-    public FfmpegCompletionMediaValidator(FfmpegMediaProbe probe)
+    public FfmpegCompletionMediaValidator(IMediaProbe probe)
     {
         this.probe = probe ?? throw new ArgumentNullException(nameof(probe));
     }
@@ -54,6 +56,29 @@ public sealed class FfmpegCompletionMediaValidator : ICompletionMediaValidator
                 $"Manifest duration {expectedDuration.TotalMilliseconds:0} ms differs from media duration {result.Duration.TotalMilliseconds:0} ms."));
         }
 
+        if (expectedDuration > TimeSpan.Zero)
+        {
+            AddCoverageDiagnostic(
+                diagnostics,
+                "VIDEO",
+                result.HasVideo,
+                result.VideoStartTime,
+                result.VideoDuration,
+                result.VideoEndTime,
+                expectedDuration);
+            if (candidate.Recording.Audio.SystemAudio == true)
+            {
+                AddCoverageDiagnostic(
+                    diagnostics,
+                    "AUDIO",
+                    result.HasAudio,
+                    result.AudioStartTime,
+                    result.AudioDuration,
+                    result.AudioEndTime,
+                    expectedDuration);
+            }
+        }
+
         var expectedVideo = candidate.Recording.Video;
         if (result.VideoWidth is int width && expectedVideo.Width is int expectedWidth && width != expectedWidth)
             diagnostics.Add(new("BUNDLE_VIDEO_METADATA_INCONSISTENT", "Final video width does not match session metadata."));
@@ -67,5 +92,43 @@ public sealed class FfmpegCompletionMediaValidator : ICompletionMediaValidator
             diagnostics.Add(new("BUNDLE_AUDIO_METADATA_INCONSISTENT", "Final audio sample rate does not match session metadata."));
 
         return diagnostics;
+    }
+
+    private static void AddCoverageDiagnostic(
+        ICollection<BundleDiagnostic> diagnostics,
+        string streamName,
+        bool hasStream,
+        TimeSpan? start,
+        TimeSpan? duration,
+        TimeSpan? end,
+        TimeSpan expectedDuration)
+    {
+        if (!hasStream)
+            return;
+
+        if (start is not TimeSpan startTime ||
+            duration is not TimeSpan streamDuration ||
+            end is not TimeSpan endTime ||
+            streamDuration <= TimeSpan.Zero)
+        {
+            diagnostics.Add(new(
+                $"BUNDLE_{streamName}_COVERAGE_INVALID",
+                $"The finalized {streamName.ToLowerInvariant()} stream does not expose usable per-stream timing."));
+            return;
+        }
+
+        if (startTime > StreamCoverageTolerance)
+        {
+            diagnostics.Add(new(
+                $"BUNDLE_{streamName}_COVERAGE_INVALID",
+                $"The finalized {streamName.ToLowerInvariant()} stream starts at {startTime.TotalMilliseconds:0} ms, after the canonical recording start."));
+        }
+
+        if (endTime + StreamCoverageTolerance < expectedDuration)
+        {
+            diagnostics.Add(new(
+                $"BUNDLE_{streamName}_COVERAGE_INVALID",
+                $"The finalized {streamName.ToLowerInvariant()} stream ends at {endTime.TotalMilliseconds:0} ms, before the canonical recording end of {expectedDuration.TotalMilliseconds:0} ms."));
+        }
     }
 }

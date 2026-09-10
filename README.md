@@ -59,9 +59,10 @@ timestamps on one monotonic recording timeline, uses bounded capture queues, wri
 work media under `.work/`, and only publishes `completed` after an `ffprobe`-backed media
 validation.
 
-The macOS capture shim is built with the installed Xcode command-line tools and currently
-requires macOS 15.0 or later because it explicitly disables microphone capture through the
-available ScreenCaptureKit configuration API. Build the solution on macOS with Xcode installed.
+The macOS capture shim is built with the installed Xcode command-line tools and requires
+macOS 13.0 or later for ScreenCaptureKit system-audio capture. Microphone capture is not
+configured in this slice; ScreenCaptureKit leaves it disabled by default. Build the solution
+on macOS with Xcode installed.
 The smoke harness requires absolute paths to FFmpeg and FFprobe (or the Homebrew defaults
 `/opt/homebrew/bin/ffmpeg` and `/opt/homebrew/bin/ffprobe`):
 

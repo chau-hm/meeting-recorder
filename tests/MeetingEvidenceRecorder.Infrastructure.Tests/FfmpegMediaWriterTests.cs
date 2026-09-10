@@ -67,7 +67,7 @@ public sealed class FfmpegMediaWriterTests
                     TimeSpan.Zero),
                 CancellationToken.None);
 
-            var finalized = await writer.FinalizeAsync(CancellationToken.None);
+            var finalized = await writer.FinalizeAsync(TimeSpan.FromSeconds(1), CancellationToken.None);
             var probe = await new FfmpegMediaProbe(ffprobePath).ProbeAsync(finalPath, CancellationToken.None);
             var candidate = new SessionManifest
             {
@@ -113,6 +113,8 @@ public sealed class FfmpegMediaWriterTests
             Assert.Equal(48000, probe.AudioSampleRate);
             Assert.Equal("h264", probe.VideoCodecName);
             Assert.Equal("aac", probe.AudioCodecName);
+            Assert.InRange(probe.VideoDuration!.Value.TotalSeconds, 0.8, 1.2);
+            Assert.InRange(probe.AudioDuration!.Value.TotalSeconds, 0.8, 1.2);
             Assert.InRange(probe.Duration.TotalSeconds, 0.8, 1.2);
             Assert.DoesNotContain(diagnostics, item => item.Severity == DiagnosticSeverity.Error);
         }
@@ -121,6 +123,156 @@ public sealed class FfmpegMediaWriterTests
             if (Directory.Exists(root))
                 Directory.Delete(root, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task WriterExtendsTheLastVideoFrameToTheCanonicalRecordingEnd()
+    {
+        if (!OperatingSystem.IsMacOS())
+            throw SkipException.ForSkip("The FIFO media writer is macOS-specific.");
+
+        var ffmpegPath = FindExecutable("MEETING_RECORDER_FFMPEG", "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg");
+        var ffprobePath = FindExecutable("MEETING_RECORDER_FFPROBE", "/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe");
+        var root = Path.Combine(Path.GetTempPath(), $"meeting-recorder-static-video-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var workDirectory = Path.Combine(root, ".work");
+            var finalPath = Path.Combine(root, "recording.mp4");
+            await using var writer = new FfmpegMediaWriter(ffmpegPath, ffprobePath);
+            await writer.InitializeAsync(
+                new MediaWriterConfiguration(
+                    workDirectory,
+                    Path.Combine(workDirectory, "recording.partial.mkv"),
+                    finalPath,
+                    new VideoFormat(2, 2, 30),
+                    new AudioFormat(48000, 2)),
+                CancellationToken.None);
+
+            var staticFrame = new byte[16];
+            staticFrame.AsSpan().Fill(0x7f);
+            await writer.WriteVideoAsync(
+                new TimedVideoFrame(
+                    new VideoFrame(
+                        0,
+                        new NativeTimestamp(0, 1),
+                        staticFrame,
+                        new VideoFormat(2, 2, 30)),
+                    TimeSpan.Zero),
+                CancellationToken.None);
+
+            for (var second = 0; second < 5; second++)
+            {
+                await writer.WriteAudioAsync(
+                    new TimedAudioFrame(
+                        new AudioFrame(
+                            AudioSourceKind.System,
+                            new NativeTimestamp(second, 1),
+                            48000,
+                            new float[48000 * 2],
+                            new AudioFormat(48000, 2)),
+                        TimeSpan.FromSeconds(second)),
+                    CancellationToken.None);
+            }
+
+            var finalized = await writer.FinalizeAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+            var probe = await new FfmpegMediaProbe(ffprobePath).ProbeAsync(finalPath, CancellationToken.None);
+            var diagnostics = new FfmpegCompletionMediaValidator(
+                new FfmpegMediaProbe(ffprobePath)).Validate(finalPath, CreateCandidate(finalized));
+
+            Assert.InRange(probe.VideoDuration!.Value.TotalSeconds, 4.8, 5.2);
+            Assert.InRange(probe.AudioDuration!.Value.TotalSeconds, 4.8, 5.2);
+            Assert.InRange(probe.Duration.TotalSeconds, 4.8, 5.2);
+            Assert.DoesNotContain(diagnostics, item => item.Severity == DiagnosticSeverity.Error);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void CompletionValidatorRejectsMateriallyTruncatedVideoStream()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"meeting-recorder-truncated-media-{Guid.NewGuid():N}.mp4");
+        File.WriteAllBytes(path, [1]);
+        try
+        {
+            var probe = new StubMediaProbe(new MediaProbeResult(
+                TimeSpan.FromSeconds(5),
+                2,
+                2,
+                30,
+                48000,
+                "h264",
+                "aac",
+                HasVideo: true,
+                HasAudio: true,
+                VideoStartTime: TimeSpan.Zero,
+                VideoDuration: TimeSpan.FromMilliseconds(100),
+                VideoEndTime: TimeSpan.FromMilliseconds(100),
+                AudioStartTime: TimeSpan.Zero,
+                AudioDuration: TimeSpan.FromSeconds(5),
+                AudioEndTime: TimeSpan.FromSeconds(5)));
+
+            var diagnostics = new FfmpegCompletionMediaValidator(probe).Validate(
+                path,
+                CreateCandidate(new FinalizedMedia(
+                    path,
+                    TimeSpan.FromSeconds(5),
+                    new VideoFormat(2, 2, 30),
+                    new AudioFormat(48000, 2),
+                    HasVideo: true,
+                    HasAudio: true)));
+
+            Assert.Contains(diagnostics, item => item.Code == "BUNDLE_VIDEO_COVERAGE_INVALID");
+            Assert.DoesNotContain(diagnostics, item => item.Code == "BUNDLE_AUDIO_COVERAGE_INVALID");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    private static SessionManifest CreateCandidate(FinalizedMedia finalized) =>
+        new()
+        {
+            SchemaVersion = "1.0",
+            SessionId = Guid.NewGuid().ToString(),
+            CreatedAt = DateTimeOffset.UtcNow,
+            DurationMs = Math.Max(1, (long)Math.Round(finalized.Duration.TotalMilliseconds)),
+            Status = SessionStatus.Finalizing,
+            Recording = new RecordingMetadata
+            {
+                File = "recording.mp4",
+                Video = new VideoMetadata
+                {
+                    SourceType = "display",
+                    Width = finalized.VideoFormat.Width,
+                    Height = finalized.VideoFormat.Height,
+                    Fps = finalized.VideoFormat.FramesPerSecond
+                },
+                Audio = new AudioMetadata
+                {
+                    SystemAudio = true,
+                    Microphone = false,
+                    MicrophoneDevice = null,
+                    OutputMode = "system_audio_only",
+                    SampleRate = finalized.AudioFormat!.SampleRate,
+                    SystemAudioCaptureMode = "os_native",
+                    SynchronizedToRecordingTimeline = true
+                }
+            },
+            EventsFile = "events.jsonl",
+            Application = new ApplicationMetadata { Name = "test", Version = "test" },
+            Platform = new PlatformMetadata { Os = "macOS", Architecture = "arm64" }
+        };
+
+    private sealed class StubMediaProbe(MediaProbeResult result) : IMediaProbe
+    {
+        public Task<MediaProbeResult> ProbeAsync(string mediaPath, CancellationToken cancellationToken) =>
+            Task.FromResult(result);
     }
 
     private static string FindExecutable(string environmentVariable, params string[] candidates)

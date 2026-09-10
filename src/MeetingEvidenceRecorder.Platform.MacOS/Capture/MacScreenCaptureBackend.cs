@@ -25,8 +25,8 @@ public sealed class MacScreenCaptureBackend : IDisplaySystemAudioCaptureBackend
 
     public MacScreenCaptureBackend()
     {
-        if (!OperatingSystem.IsMacOSVersionAtLeast(15, 0))
-            throw new PlatformNotSupportedException("ScreenCaptureKit display plus system-audio recording requires macOS 15.0 or later for this slice.");
+        if (!OperatingSystem.IsMacOSVersionAtLeast(13, 0))
+            throw new PlatformNotSupportedException("ScreenCaptureKit display plus system-audio recording requires macOS 13.0 or later for this slice.");
 
         sampleCallback = OnSample;
         errorCallback = OnNativeError;

@@ -14,12 +14,23 @@ public sealed record MediaProbeResult(
     string? VideoCodecName,
     string? AudioCodecName,
     bool HasVideo,
-    bool HasAudio);
+    bool HasAudio,
+    TimeSpan? VideoStartTime,
+    TimeSpan? VideoDuration,
+    TimeSpan? VideoEndTime,
+    TimeSpan? AudioStartTime,
+    TimeSpan? AudioDuration,
+    TimeSpan? AudioEndTime);
 
 public sealed class MediaProbeException(string message, Exception? inner = null)
     : InvalidOperationException(message, inner);
 
-public sealed class FfmpegMediaProbe
+public interface IMediaProbe
+{
+    Task<MediaProbeResult> ProbeAsync(string mediaPath, CancellationToken cancellationToken);
+}
+
+public sealed class FfmpegMediaProbe : IMediaProbe
 {
     private readonly string executablePath;
 
@@ -92,6 +103,10 @@ public sealed class FfmpegMediaProbe
         int? sampleRate = null;
         string? videoCodec = null;
         string? audioCodec = null;
+        TimeSpan? videoStart = null;
+        TimeSpan? videoDuration = null;
+        TimeSpan? audioStart = null;
+        TimeSpan? audioDuration = null;
 
         if (root.TryGetProperty("streams", out var streams) && streams.ValueKind == JsonValueKind.Array)
         {
@@ -107,12 +122,16 @@ public sealed class FfmpegMediaProbe
                     height = ReadPositiveInt(stream, "height");
                     fps = ReadRate(stream, "avg_frame_rate") ?? ReadRate(stream, "r_frame_rate");
                     videoCodec = ReadString(stream, "codec_name");
+                    videoStart = ReadTime(stream, "start_time");
+                    videoDuration = ReadTime(stream, "duration");
                 }
                 else if (codecType.GetString() == "audio" && !hasAudio)
                 {
                     hasAudio = true;
                     sampleRate = ReadPositiveInt(stream, "sample_rate");
                     audioCodec = ReadString(stream, "codec_name");
+                    audioStart = ReadTime(stream, "start_time");
+                    audioDuration = ReadTime(stream, "duration");
                 }
             }
         }
@@ -141,7 +160,13 @@ public sealed class FfmpegMediaProbe
             videoCodec,
             audioCodec,
             hasVideo,
-            hasAudio);
+            hasAudio,
+            videoStart,
+            videoDuration,
+            AddIfKnown(videoStart, videoDuration),
+            audioStart,
+            audioDuration,
+            AddIfKnown(audioStart, audioDuration));
     }
 
     private static string? ReadString(JsonElement element, string propertyName) =>
@@ -176,5 +201,45 @@ public sealed class FfmpegMediaProbe
 
         var rate = numerator / denominator;
         return double.IsFinite(rate) && rate > 0 ? rate : null;
+    }
+
+    private static TimeSpan? ReadTime(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var value))
+            return null;
+
+        var text = value.ValueKind switch
+        {
+            JsonValueKind.Number => value.GetRawText(),
+            JsonValueKind.String => value.GetString(),
+            _ => null
+        };
+        if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) ||
+            !double.IsFinite(seconds))
+            return null;
+
+        try
+        {
+            return TimeSpan.FromSeconds(seconds);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    private static TimeSpan? AddIfKnown(TimeSpan? start, TimeSpan? duration)
+    {
+        if (start is not TimeSpan startValue || duration is not TimeSpan durationValue)
+            return null;
+
+        try
+        {
+            return startValue + durationValue;
+        }
+        catch (OverflowException)
+        {
+            return null;
+        }
     }
 }

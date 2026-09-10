@@ -436,7 +436,8 @@ int mer_capture_start(
     configuration.capturesAudio = YES;
     configuration.sampleRate = 48000;
     configuration.channelCount = 2;
-    configuration.captureMicrophone = NO;
+    // ScreenCaptureKit defaults microphone capture to disabled. Avoid the
+    // macOS 15-only captureMicrophone property because this PR has no mic path.
 
     MERStreamOutput *output = [MERStreamOutput new];
     output.sampleCallback = session.sampleCallback;
