@@ -1,4 +1,5 @@
 using MeetingEvidenceRecorder.Core.Evidence;
+using MeetingEvidenceRecorder.Core.Recording;
 using MeetingEvidenceRecorder.Infrastructure.Persistence;
 
 namespace MeetingEvidenceRecorder.Infrastructure.Media;
@@ -6,7 +7,7 @@ namespace MeetingEvidenceRecorder.Infrastructure.Media;
 public sealed class FfmpegCompletionMediaValidator : ICompletionMediaValidator
 {
     // H.264/AAC packetization can move reported stream boundaries by a few packets.
-    private static readonly TimeSpan StreamCoverageTolerance = TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan StreamCoverageTolerance = RecordingTimelinePolicy.FinalizationTailTolerance;
     private readonly IMediaProbe probe;
 
     public FfmpegCompletionMediaValidator(IMediaProbe probe)

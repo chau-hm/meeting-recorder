@@ -302,6 +302,7 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
                 frame.SourceTimestamp,
                 CaptureStream.Video,
                 cancellationToken).ConfigureAwait(false);
+            ValidateMappedTimestamp(timestamp, CaptureStream.Video);
             await mediaWriter.WriteVideoAsync(
                 new TimedVideoFrame(frame, timestamp),
                 cancellationToken).ConfigureAwait(false);
@@ -316,6 +317,11 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
                 frame.SourceTimestamp,
                 CaptureStream.Audio,
                 cancellationToken).ConfigureAwait(false);
+            ValidateMappedTimestamp(
+                timestamp,
+                CaptureStream.Audio,
+                frame.SampleCount,
+                frame.Format.SampleRate);
             await mediaWriter.WriteAudioAsync(
                 new TimedAudioFrame(frame, timestamp),
                 cancellationToken).ConfigureAwait(false);
@@ -462,31 +468,95 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
         CaptureStream stream,
         CancellationToken cancellationToken)
     {
-        Task? waitForOrigin = null;
-        lock (terminalGate)
+        try
         {
-            if (stream == CaptureStream.Video)
-                firstVideoTimestamp ??= sourceTimestamp;
-            else
-                firstAudioTimestamp ??= sourceTimestamp;
-
-            if (!timestampMapper!.HasOrigin &&
-                firstVideoTimestamp is NativeTimestamp video &&
-                firstAudioTimestamp is NativeTimestamp audio)
+            Task? waitForOrigin = null;
+            lock (terminalGate)
             {
-                timestampMapper.SetOrigin(Earlier(video, audio));
-                timestampOriginReady!.TrySetResult(true);
+                if (stream == CaptureStream.Video)
+                    firstVideoTimestamp ??= sourceTimestamp;
+                else
+                    firstAudioTimestamp ??= sourceTimestamp;
+
+                if (!timestampMapper!.HasOrigin &&
+                    firstVideoTimestamp is NativeTimestamp video &&
+                    firstAudioTimestamp is NativeTimestamp audio)
+                {
+                    timestampMapper.SetOrigin(Earlier(video, audio));
+                    timestampOriginReady!.TrySetResult(true);
+                }
+
+                if (!timestampMapper.HasOrigin)
+                    waitForOrigin = timestampOriginReady!.Task;
             }
 
-            if (!timestampMapper.HasOrigin)
-                waitForOrigin = timestampOriginReady!.Task;
+            if (waitForOrigin is not null)
+                await waitForOrigin.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+            return timestampMapper!.Map(sourceTimestamp);
+        }
+        catch (Exception exception) when (
+            exception is InvalidOperationException or DivideByZeroException or OverflowException)
+        {
+            throw CreateTimelineDiscontinuity(
+                stream,
+                "The native timestamp could not be mapped onto the canonical recording timeline.",
+                exception.Message);
+        }
+    }
+
+    private void ValidateMappedTimestamp(
+        TimeSpan timestamp,
+        CaptureStream stream,
+        int sampleCount = 0,
+        int sampleRate = 0)
+    {
+        var coveredUntil = timestamp;
+        if (stream == CaptureStream.Audio)
+        {
+            if (sampleCount < 0 || sampleRate <= 0)
+            {
+                throw CreateTimelineDiscontinuity(
+                    stream,
+                    "The native audio buffer has invalid duration metadata.",
+                    $"Sample count={sampleCount}, sample rate={sampleRate}.");
+            }
+
+            try
+            {
+                coveredUntil = timestamp + TimeSpan.FromSeconds((double)sampleCount / sampleRate);
+            }
+            catch (Exception exception) when (exception is ArgumentOutOfRangeException or OverflowException)
+            {
+                throw CreateTimelineDiscontinuity(
+                    stream,
+                    "The native audio buffer duration overflowed the canonical recording timeline.",
+                    exception.Message);
+            }
         }
 
-        if (waitForOrigin is not null)
-            await waitForOrigin.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var clockElapsed = clock.Elapsed;
+        var allowedEnd = clockElapsed >= TimeSpan.MaxValue - RecordingTimelinePolicy.SourceTimestampLeadTolerance
+            ? TimeSpan.MaxValue
+            : clockElapsed + RecordingTimelinePolicy.SourceTimestampLeadTolerance;
+        if (coveredUntil <= allowedEnd)
+            return;
 
-        return timestampMapper!.Map(sourceTimestamp);
+        throw CreateTimelineDiscontinuity(
+            stream,
+            "A native media timestamp advanced materially beyond the canonical recording clock.",
+            $"Mapped {stream.ToString().ToLowerInvariant()} timestamp covers through {coveredUntil.TotalMilliseconds:0} ms while RecordingClock.Elapsed is {clockElapsed.TotalMilliseconds:0} ms; allowed lead is {RecordingTimelinePolicy.SourceTimestampLeadTolerance.TotalMilliseconds:0} ms.");
     }
+
+    private static RecorderException CreateTimelineDiscontinuity(
+        CaptureStream stream,
+        string userMessage,
+        string diagnosticMessage) =>
+        new(new RecorderError(
+            "MEDIA_TIMELINE_DISCONTINUITY",
+            RecorderErrorSeverity.Fatal,
+            userMessage,
+            $"Stream={stream}; {diagnosticMessage}"));
 
     private static NativeTimestamp Earlier(NativeTimestamp first, NativeTimestamp second)
     {

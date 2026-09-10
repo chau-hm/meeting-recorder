@@ -361,6 +361,87 @@ public sealed class RecordingSessionCoordinatorTests
     }
 
     [Fact]
+    public async Task AcceptsBoundedVideoLeadAndAudioBufferCoverage()
+    {
+        var capture = new FakeCapture([]);
+        var writer = new FakeMediaWriter([]);
+        await using var coordinator = new RecordingSessionCoordinator(
+            capture,
+            writer,
+            new FakeBundleStoreFactory([]),
+            new FakeClock { RunningElapsed = TimeSpan.FromSeconds(1) });
+
+        await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
+        capture.EmitVideo(new NativeTimestamp(1000, 1000));
+        capture.EmitAudio(new NativeTimestamp(1000, 1000));
+        capture.EmitVideo(new NativeTimestamp(2030, 1000));
+        capture.EmitAudio(new NativeTimestamp(2000, 1000), sampleCount: 2400);
+        await Task.WhenAll(
+            writer.SecondVideoWriteEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)),
+            writer.SecondAudioWriteEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        var completion = await coordinator.StopAsync(CancellationToken.None);
+
+        Assert.Equal(RecordingState.Completed, completion.State);
+        Assert.Contains(TimeSpan.FromMilliseconds(1030), writer.VideoTimestamps);
+        Assert.Contains(TimeSpan.FromSeconds(1), writer.AudioTimestamps);
+    }
+
+    [Fact]
+    public async Task LargeVideoTimestampDiscontinuityAutomaticallyTerminatesRecording()
+    {
+        var capture = new FakeCapture([]);
+        var writer = new FakeMediaWriter([]);
+        var store = new FakeBundleStoreFactory([]);
+        await using var coordinator = new RecordingSessionCoordinator(
+            capture,
+            writer,
+            store,
+            new FakeClock { RunningElapsed = TimeSpan.FromSeconds(10) });
+
+        await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
+        capture.EmitVideo(new NativeTimestamp(0, 1));
+        capture.EmitAudio(new NativeTimestamp(0, 1));
+        capture.EmitVideo(new NativeTimestamp(100, 1));
+
+        var completion = await coordinator.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(RecordingState.Incomplete, completion.State);
+        Assert.Equal("MEDIA_TIMELINE_DISCONTINUITY", completion.Error!.Code);
+        Assert.True(coordinator.Completion.IsCompletedSuccessfully);
+        Assert.Equal(1, capture.StopCalls);
+        Assert.True(store.Store!.MarkedIncomplete);
+        Assert.Equal(0, writer.FinalizeCalls);
+    }
+
+    [Fact]
+    public async Task LargeAudioTimestampDiscontinuityAutomaticallyTerminatesRecording()
+    {
+        var capture = new FakeCapture([]);
+        var writer = new FakeMediaWriter([]);
+        var store = new FakeBundleStoreFactory([]);
+        await using var coordinator = new RecordingSessionCoordinator(
+            capture,
+            writer,
+            store,
+            new FakeClock { RunningElapsed = TimeSpan.FromSeconds(10) });
+
+        await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
+        capture.EmitVideo(new NativeTimestamp(0, 1));
+        capture.EmitAudio(new NativeTimestamp(0, 1));
+        capture.EmitAudio(new NativeTimestamp(100, 1));
+
+        var completion = await coordinator.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(RecordingState.Incomplete, completion.State);
+        Assert.Equal("MEDIA_TIMELINE_DISCONTINUITY", completion.Error!.Code);
+        Assert.True(coordinator.Completion.IsCompletedSuccessfully);
+        Assert.Equal(1, capture.StopCalls);
+        Assert.True(store.Store!.MarkedIncomplete);
+        Assert.Equal(0, writer.FinalizeCalls);
+    }
+
+    [Fact]
     public async Task DisposalStopsCaptureBeforeWriterAndStore()
     {
         var log = new List<string>();
@@ -388,10 +469,15 @@ public sealed class RecordingSessionCoordinatorTests
     private sealed class FakeClock : IRecordingClock
     {
         public TimeSpan Elapsed { get; private set; }
+        public TimeSpan RunningElapsed { get; init; }
         public bool IsRunning { get; private set; }
         public bool IsPaused => false;
 
-        public void Start() => IsRunning = true;
+        public void Start()
+        {
+            IsRunning = true;
+            Elapsed = RunningElapsed;
+        }
         public void Pause() => throw new NotSupportedException();
         public void Resume() => throw new NotSupportedException();
 
@@ -480,12 +566,12 @@ public sealed class RecordingSessionCoordinatorTests
                 new byte[16],
                 new VideoFormat(2, 2, 30)));
 
-        public void EmitAudio(NativeTimestamp? timestamp = null) =>
+        public void EmitAudio(NativeTimestamp? timestamp = null, int sampleCount = 1) =>
             audioFrames.Writer.TryWrite(new AudioFrame(
                 AudioSourceKind.System,
                 timestamp ?? new NativeTimestamp(10, 1),
-                1,
-                new float[2],
+                sampleCount,
+                new float[sampleCount * 2],
                 new AudioFormat(48000, 2)));
 
         public void RaiseError(RecorderError error) =>
@@ -508,9 +594,14 @@ public sealed class RecordingSessionCoordinatorTests
         public bool Initialized { get; private set; }
         public bool Disposed { get; private set; }
         public int DisposeCalls { get; private set; }
+        public int FinalizeCalls { get; private set; }
         public TaskCompletionSource<bool> VideoWriteEntered { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<bool> AudioWriteEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> SecondVideoWriteEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> SecondAudioWriteEntered { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public List<TimeSpan> VideoTimestamps { get; } = [];
         public List<TimeSpan> AudioTimestamps { get; } = [];
@@ -533,6 +624,8 @@ public sealed class RecordingSessionCoordinatorTests
                 throw VideoWriteFailure;
             cancellationToken.ThrowIfCancellationRequested();
             VideoTimestamps.Add(frame.RecordingTimestamp);
+            if (VideoTimestamps.Count >= 2)
+                SecondVideoWriteEntered.TrySetResult(true);
             await Task.CompletedTask;
         }
 
@@ -545,6 +638,8 @@ public sealed class RecordingSessionCoordinatorTests
                 throw AudioWriteFailure;
             cancellationToken.ThrowIfCancellationRequested();
             AudioTimestamps.Add(frame.RecordingTimestamp);
+            if (AudioTimestamps.Count >= 2)
+                SecondAudioWriteEntered.TrySetResult(true);
             await Task.CompletedTask;
         }
 
@@ -552,6 +647,7 @@ public sealed class RecordingSessionCoordinatorTests
             TimeSpan recordingEnd,
             CancellationToken cancellationToken)
         {
+            FinalizeCalls++;
             if (FinalizeFailure is not null)
                 return Task.FromException<FinalizedMedia>(FinalizeFailure);
 
