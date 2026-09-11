@@ -251,13 +251,14 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
             await mediaWriter.BeginFinalizationAsync(CancellationToken.None).ConfigureAwait(false);
             recordingEnd ??= CaptureCanonicalRecordingEnd();
             await AwaitPumpAsync(videoPump, sessionToken).ConfigureAwait(false);
-            await mediaWriter.CompleteVideoTransportAsync(
+            var videoTransportCompletion = mediaWriter.CompleteVideoTransportAsync(
                 recordingEnd.Value,
-                CancellationToken.None).ConfigureAwait(false);
+                sessionToken);
             await AwaitPumpAsync(audioPump, sessionToken).ConfigureAwait(false);
             await mediaWriter.CompleteAudioTransportAsync(
                 recordingEnd.Value,
                 CancellationToken.None).ConfigureAwait(false);
+            await videoTransportCompletion.ConfigureAwait(false);
 
         }
         catch (Exception exception)

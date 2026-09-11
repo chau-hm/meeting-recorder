@@ -165,7 +165,6 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         TimeSpan recordingEnd,
         CancellationToken cancellationToken)
     {
-        await CompleteVideoTransportAsync(recordingEnd, cancellationToken).ConfigureAwait(false);
         await audioGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
