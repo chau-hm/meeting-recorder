@@ -34,6 +34,9 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
     private TaskCompletionSource<bool>? timestampOriginReady;
     private NativeTimestamp? firstVideoTimestamp;
     private NativeTimestamp? firstAudioTimestamp;
+    private TimeSpan? firstVideoClockElapsed;
+    private TimeSpan? firstAudioClockElapsed;
+    private TimeSpan? mediaClockOffset;
     private TimeSpan? lastAcceptedVideoTimestamp;
     private TimeSpan? lastAcceptedAudioEnd;
     private TimeSpan? canonicalRecordingEnd;
@@ -92,6 +95,9 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
                 TaskCreationOptions.RunContinuationsAsynchronously);
             firstVideoTimestamp = null;
             firstAudioTimestamp = null;
+            firstVideoClockElapsed = null;
+            firstAudioClockElapsed = null;
+            mediaClockOffset = null;
             lastAcceptedVideoTimestamp = null;
             lastAcceptedAudioEnd = null;
             canonicalRecordingEnd = null;
@@ -367,11 +373,11 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
     {
         while (true)
         {
-            var elapsed = clock.Elapsed;
-            if (elapsed > RecordingTimelinePolicy.ActiveVideoWatermarkHoldback)
+            var mediaProgress = GetExpectedMediaProgress(clock.Elapsed);
+            if (mediaProgress > RecordingTimelinePolicy.ActiveVideoWatermarkHoldback)
             {
                 await mediaWriter.AdvanceVideoWatermarkAsync(
-                        elapsed - RecordingTimelinePolicy.ActiveVideoWatermarkHoldback,
+                        mediaProgress - RecordingTimelinePolicy.ActiveVideoWatermarkHoldback,
                         cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -550,16 +556,28 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
             Task? waitForOrigin = null;
             lock (terminalGate)
             {
+                var clockElapsed = clock.Elapsed;
                 if (stream == CaptureStream.Video)
+                {
                     firstVideoTimestamp ??= sourceTimestamp;
+                    firstVideoClockElapsed ??= clockElapsed;
+                }
                 else
+                {
                     firstAudioTimestamp ??= sourceTimestamp;
+                    firstAudioClockElapsed ??= clockElapsed;
+                }
 
                 if (!timestampMapper!.HasOrigin &&
                     firstVideoTimestamp is NativeTimestamp video &&
                     firstAudioTimestamp is NativeTimestamp audio)
                 {
                     timestampMapper.SetOrigin(Earlier(video, audio));
+                    mediaClockOffset = SelectMediaClockOffset(
+                        video,
+                        firstVideoClockElapsed!.Value,
+                        audio,
+                        firstAudioClockElapsed!.Value);
                     timestampOriginReady!.TrySetResult(true);
                 }
 
@@ -613,21 +631,13 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
         }
 
         var clockElapsed = canonicalRecordingEnd ?? clock.Elapsed;
-        var allowedEnd = clockElapsed >= TimeSpan.MaxValue - RecordingTimelinePolicy.SourceTimestampLeadTolerance
+        var expectedMediaProgress = GetExpectedMediaProgress(clockElapsed);
+        var allowedEnd = expectedMediaProgress >= TimeSpan.MaxValue - RecordingTimelinePolicy.SourceTimestampLeadTolerance
             ? TimeSpan.MaxValue
-            : clockElapsed + RecordingTimelinePolicy.SourceTimestampLeadTolerance;
+            : expectedMediaProgress + RecordingTimelinePolicy.SourceTimestampLeadTolerance;
         var previouslyAccepted = stream == CaptureStream.Video
             ? lastAcceptedVideoTimestamp
             : lastAcceptedAudioEnd;
-        if (previouslyAccepted is TimeSpan &&
-            clockElapsed > RecordingTimelinePolicy.SourceTimestampReorderTolerance &&
-            coveredUntil < clockElapsed - RecordingTimelinePolicy.SourceTimestampReorderTolerance)
-        {
-            throw CreateTimelineDiscontinuity(
-                stream,
-                "A native media timestamp arrived materially stale on the canonical recording timeline.",
-                $"Mapped {stream.ToString().ToLowerInvariant()} coverage ends at {coveredUntil.TotalMilliseconds:0} ms while the canonical recording clock is {clockElapsed.TotalMilliseconds:0} ms; allowed staleness is {RecordingTimelinePolicy.SourceTimestampReorderTolerance.TotalMilliseconds:0} ms.");
-        }
 
         if (previouslyAccepted is TimeSpan previous &&
             timestamp < previous - RecordingTimelinePolicy.SourceTimestampReorderTolerance)
@@ -643,7 +653,7 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
             throw CreateTimelineDiscontinuity(
                 stream,
                 "A native media timestamp advanced materially beyond the canonical recording clock.",
-                $"Mapped {stream.ToString().ToLowerInvariant()} timestamp covers through {coveredUntil.TotalMilliseconds:0} ms while the canonical recording end is {clockElapsed.TotalMilliseconds:0} ms; allowed lead is {RecordingTimelinePolicy.SourceTimestampLeadTolerance.TotalMilliseconds:0} ms.");
+                $"Mapped {stream.ToString().ToLowerInvariant()} timestamp covers through {coveredUntil.TotalMilliseconds:0} ms while the aligned media clock is {expectedMediaProgress.TotalMilliseconds:0} ms; allowed lead is {RecordingTimelinePolicy.SourceTimestampLeadTolerance.TotalMilliseconds:0} ms (clock elapsed {clockElapsed.TotalMilliseconds:0} ms, media-clock offset {mediaClockOffset?.TotalMilliseconds:0} ms).");
         }
 
         if (stream == CaptureStream.Video)
@@ -664,6 +674,14 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
         return canonicalRecordingEnd.Value;
     }
 
+    private TimeSpan GetExpectedMediaProgress(TimeSpan clockElapsed)
+    {
+        if (mediaClockOffset is not TimeSpan offset || clockElapsed <= offset)
+            return TimeSpan.Zero;
+
+        return clockElapsed - offset;
+    }
+
     private static RecorderException CreateTimelineDiscontinuity(
         CaptureStream stream,
         string userMessage,
@@ -676,10 +694,33 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
 
     private static NativeTimestamp Earlier(NativeTimestamp first, NativeTimestamp second)
     {
-        var firstSeconds = (decimal)first.Value / first.Timescale;
-        var secondSeconds = (decimal)second.Value / second.Timescale;
+        var firstSeconds = ToSeconds(first);
+        var secondSeconds = ToSeconds(second);
         return firstSeconds <= secondSeconds ? first : second;
     }
+
+    private static TimeSpan SelectMediaClockOffset(
+        NativeTimestamp firstVideo,
+        TimeSpan videoClockElapsed,
+        NativeTimestamp firstAudio,
+        TimeSpan audioClockElapsed)
+    {
+        var videoSeconds = ToSeconds(firstVideo);
+        var audioSeconds = ToSeconds(firstAudio);
+        if (videoSeconds < audioSeconds)
+            return videoClockElapsed;
+        if (audioSeconds < videoSeconds)
+            return audioClockElapsed;
+
+        // Equal native origins have no unique stream owner. The earlier callback is the most
+        // conservative estimate for the shared media origin.
+        return videoClockElapsed <= audioClockElapsed
+            ? videoClockElapsed
+            : audioClockElapsed;
+    }
+
+    private static decimal ToSeconds(NativeTimestamp timestamp) =>
+        (decimal)timestamp.Value / timestamp.Timescale;
 
     private async Task RollbackStartAsync(Exception original)
     {
