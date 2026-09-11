@@ -13,6 +13,21 @@ public static class RecordingTimelinePolicy
     public static readonly TimeSpan SourceTimestampLeadTolerance = TimeSpan.FromSeconds(1);
 
     /// <summary>
+    /// Active video commits trail the canonical clock by the bounded native callback/queue
+    /// window. The macOS capture queues cover roughly 0.27 seconds of video and 0.64 seconds
+    /// of 20 ms audio buffers, so 750 ms leaves room for callback scheduling without reserving
+    /// future video content.
+    /// </summary>
+    public static readonly TimeSpan VideoCommitLag = TimeSpan.FromMilliseconds(750);
+
+    /// <summary>
+    /// Coarse fallback tick used when audio backpressure prevents the audio callback path from
+    /// triggering progress. This is intentionally far below frame rate and independent of media
+    /// timestamps.
+    /// </summary>
+    public static readonly TimeSpan VideoCommitProgressInterval = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
     /// Only a small codec/buffer tail may be synthesized when finalizing audio to the canonical
     /// recording end. Larger missing intervals remain visible to completion coverage validation.
     /// </summary>
@@ -29,4 +44,12 @@ public static class RecordingTimelinePolicy
     /// the last frame to the canonical end independently of this runtime-gap limit.
     /// </summary>
     public static readonly TimeSpan MaximumRuntimeWriterGap = TimeSpan.FromSeconds(10);
+
+    public static TimeSpan GetSafeVideoCommitTime(TimeSpan recordingClockElapsed)
+    {
+        if (recordingClockElapsed <= VideoCommitLag)
+            return TimeSpan.Zero;
+
+        return recordingClockElapsed - VideoCommitLag;
+    }
 }

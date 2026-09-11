@@ -27,8 +27,11 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
     private Task? audioPump;
     private Task? videoPumpObserver;
     private Task? audioPumpObserver;
+    private Task? videoWatermarkPump;
+    private Task? videoWatermarkObserver;
     private RecordingTimestampMapper? timestampMapper;
     private TaskCompletionSource<bool>? timestampOriginReady;
+    private CancellationTokenSource? videoWatermarkCancellation;
     private NativeTimestamp? firstVideoTimestamp;
     private NativeTimestamp? firstAudioTimestamp;
     private RecorderError? runtimeError;
@@ -140,10 +143,17 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
             }
 
             bundleStore.WriteActive(CreateManifest(sessionOptions, SessionStatus.Recording, null));
+            videoWatermarkCancellation =
+                CancellationTokenSource.CreateLinkedTokenSource(sessionCancellation.Token);
             videoPump = PumpVideoAsync(sessionCancellation.Token);
             audioPump = PumpAudioAsync(sessionCancellation.Token);
-            videoPumpObserver = ObservePumpAsync(videoPump, "video");
-            audioPumpObserver = ObservePumpAsync(audioPump, "audio");
+            videoWatermarkPump = PumpVideoWatermarkAsync(videoWatermarkCancellation.Token);
+            videoPumpObserver = ObservePumpAsync(videoPump, "video", sessionCancellation.Token);
+            audioPumpObserver = ObservePumpAsync(audioPump, "audio", sessionCancellation.Token);
+            videoWatermarkObserver = ObservePumpAsync(
+                videoWatermarkPump,
+                "video watermark",
+                videoWatermarkCancellation.Token);
         }
         catch (Exception exception)
         {
@@ -239,7 +249,18 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
                     "The shared recording timeline could not be established for both required streams.")));
             }
 
+            videoWatermarkCancellation?.Cancel();
+            await AwaitPumpForShutdownAsync(videoWatermarkPump, []).ConfigureAwait(false);
+            await AwaitPumpForShutdownAsync(videoWatermarkObserver, []).ConfigureAwait(false);
+
             await AwaitPumpAsync(videoPump, sessionToken).ConfigureAwait(false);
+            // Capture has stopped and the video pump has drained, so no later real frame can
+            // occupy an active-recording slot. Release the bounded audio tail before waiting for
+            // the audio pump; FinalizeAsync still owns the canonical end extension.
+            await mediaWriter.AdvanceVideoWatermarkAsync(
+                    clock.Elapsed,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
             await AwaitPumpAsync(audioPump, sessionToken).ConfigureAwait(false);
         }
         catch (Exception exception)
@@ -306,6 +327,7 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
             await mediaWriter.WriteVideoAsync(
                 new TimedVideoFrame(frame, timestamp),
                 cancellationToken).ConfigureAwait(false);
+            await AdvanceSafeVideoWatermarkAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -322,19 +344,35 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
                 CaptureStream.Audio,
                 frame.SampleCount,
                 frame.Format.SampleRate);
+            await AdvanceSafeVideoWatermarkAsync(cancellationToken).ConfigureAwait(false);
             await mediaWriter.WriteAudioAsync(
                 new TimedAudioFrame(frame, timestamp),
                 cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private async Task ObservePumpAsync(Task pump, string streamName)
+    private async Task PumpVideoWatermarkAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(RecordingTimelinePolicy.VideoCommitProgressInterval);
+        while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+            await AdvanceSafeVideoWatermarkAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private ValueTask AdvanceSafeVideoWatermarkAsync(CancellationToken cancellationToken) =>
+        mediaWriter.AdvanceVideoWatermarkAsync(
+            RecordingTimelinePolicy.GetSafeVideoCommitTime(clock.Elapsed),
+            cancellationToken);
+
+    private async Task ObservePumpAsync(
+        Task pump,
+        string streamName,
+        CancellationToken cancellationToken)
     {
         try
         {
             await pump.ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (sessionCancellation?.IsCancellationRequested == true)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
         catch (Exception exception)
@@ -391,8 +429,10 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
 
         await AwaitPumpForShutdownAsync(videoPump, diagnostics).ConfigureAwait(false);
         await AwaitPumpForShutdownAsync(audioPump, diagnostics).ConfigureAwait(false);
+        await AwaitPumpForShutdownAsync(videoWatermarkPump, diagnostics).ConfigureAwait(false);
         await AwaitPumpForShutdownAsync(videoPumpObserver, diagnostics).ConfigureAwait(false);
         await AwaitPumpForShutdownAsync(audioPumpObserver, diagnostics).ConfigureAwait(false);
+        await AwaitPumpForShutdownAsync(videoWatermarkObserver, diagnostics).ConfigureAwait(false);
 
         try
         {
@@ -586,8 +626,10 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
 
         await AwaitPumpForShutdownAsync(videoPump, []);
         await AwaitPumpForShutdownAsync(audioPump, []);
+        await AwaitPumpForShutdownAsync(videoWatermarkPump, []);
         await AwaitPumpForShutdownAsync(videoPumpObserver, []);
         await AwaitPumpForShutdownAsync(audioPumpObserver, []);
+        await AwaitPumpForShutdownAsync(videoWatermarkObserver, []);
 
         try
         {
@@ -824,8 +866,11 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
             var shutdownDiagnostics = new List<string>();
             await AwaitPumpForShutdownAsync(videoPump, shutdownDiagnostics).ConfigureAwait(false);
             await AwaitPumpForShutdownAsync(audioPump, shutdownDiagnostics).ConfigureAwait(false);
+            videoWatermarkCancellation?.Cancel();
+            await AwaitPumpForShutdownAsync(videoWatermarkPump, shutdownDiagnostics).ConfigureAwait(false);
             await AwaitPumpForShutdownAsync(videoPumpObserver, shutdownDiagnostics).ConfigureAwait(false);
             await AwaitPumpForShutdownAsync(audioPumpObserver, shutdownDiagnostics).ConfigureAwait(false);
+            await AwaitPumpForShutdownAsync(videoWatermarkObserver, shutdownDiagnostics).ConfigureAwait(false);
             if (shutdownFailure is null &&
                 shutdownDiagnostics.Count > 0 &&
                 !completionSource.Task.IsCompleted)
@@ -846,6 +891,8 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
                 {
                     sessionCancellation?.Dispose();
                     sessionCancellation = null;
+                    videoWatermarkCancellation?.Dispose();
+                    videoWatermarkCancellation = null;
                     capture.Error -= OnCaptureError;
                     if (State is not (RecordingState.Completed or RecordingState.Incomplete or RecordingState.Failed))
                         SetState(RecordingState.Failed);

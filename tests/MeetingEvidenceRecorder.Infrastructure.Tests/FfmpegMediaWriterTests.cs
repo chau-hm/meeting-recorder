@@ -194,6 +194,126 @@ public sealed class FfmpegMediaWriterTests
     }
 
     [Fact]
+    public async Task WriterKeepsAudioTransportFlowingDuringLongStaticVideo()
+    {
+        if (!OperatingSystem.IsMacOS())
+            throw SkipException.ForSkip("The FIFO media writer is macOS-specific.");
+
+        var ffmpegPath = FindExecutable("MEETING_RECORDER_FFMPEG", "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg");
+        var ffprobePath = FindExecutable("MEETING_RECORDER_FFPROBE", "/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe");
+        var root = Path.Combine(Path.GetTempPath(), $"meeting-recorder-static-audio-stress-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var format = new VideoFormat(2, 2, 30);
+            var workDirectory = Path.Combine(root, ".work");
+            var finalPath = Path.Combine(root, "recording.mp4");
+            await using var writer = new FfmpegMediaWriter(ffmpegPath, ffprobePath);
+            await writer.InitializeAsync(
+                new MediaWriterConfiguration(
+                    workDirectory,
+                    Path.Combine(workDirectory, "recording.partial.mkv"),
+                    finalPath,
+                    format,
+                    new AudioFormat(48000, 2)),
+                CancellationToken.None);
+
+            await writer.WriteVideoAsync(CreateVideoFrame(0, TimeSpan.Zero, format, 127, 127, 127), CancellationToken.None);
+            var audioSamples = new float[960 * 2];
+            for (var audioIndex = 0; audioIndex < 2000; audioIndex++)
+            {
+                var clockElapsed = TimeSpan.FromMilliseconds((audioIndex + 1) * 20);
+                await writer.AdvanceVideoWatermarkAsync(
+                    RecordingTimelinePolicy.GetSafeVideoCommitTime(clockElapsed),
+                    CancellationToken.None);
+                await WriteAudioChunkAsync(writer, audioIndex, audioSamples);
+                await Task.Yield();
+            }
+
+            var finalized = await writer.FinalizeAsync(TimeSpan.FromSeconds(40), CancellationToken.None);
+            var probe = await new FfmpegMediaProbe(ffprobePath).ProbeAsync(finalPath, CancellationToken.None);
+
+            Assert.InRange(finalized.Duration.TotalSeconds, 39.5, 40.5);
+            Assert.InRange(probe.VideoDuration!.Value.TotalSeconds, 39.5, 40.5);
+            Assert.InRange(probe.AudioDuration!.Value.TotalSeconds, 39.5, 40.5);
+            Assert.InRange(probe.Duration.TotalSeconds, 39.5, 40.5);
+            Assert.InRange(writer.MaxAudioTransportQueueDepth, 1, 1024 + 2);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task WriterPreservesRealVideoAfterLongStaticInterval()
+    {
+        if (!OperatingSystem.IsMacOS())
+            throw SkipException.ForSkip("The FIFO media writer is macOS-specific.");
+
+        var ffmpegPath = FindExecutable("MEETING_RECORDER_FFMPEG", "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg");
+        var ffprobePath = FindExecutable("MEETING_RECORDER_FFPROBE", "/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe");
+        var root = Path.Combine(Path.GetTempPath(), $"meeting-recorder-static-motion-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var format = new VideoFormat(16, 16, 30);
+            var workDirectory = Path.Combine(root, ".work");
+            var finalPath = Path.Combine(root, "recording.mp4");
+            await using var writer = new FfmpegMediaWriter(ffmpegPath, ffprobePath);
+            await writer.InitializeAsync(
+                new MediaWriterConfiguration(
+                    workDirectory,
+                    Path.Combine(workDirectory, "recording.partial.mkv"),
+                    finalPath,
+                    format,
+                    new AudioFormat(48000, 2)),
+                CancellationToken.None);
+
+            await writer.WriteVideoAsync(CreateVideoFrame(0, TimeSpan.Zero, format, 0, 0, 0), CancellationToken.None);
+            var audioSamples = new float[960 * 2];
+            for (var audioIndex = 0; audioIndex < 250; audioIndex++)
+            {
+                var clockElapsed = TimeSpan.FromMilliseconds((audioIndex + 1) * 20);
+                await writer.AdvanceVideoWatermarkAsync(
+                    RecordingTimelinePolicy.GetSafeVideoCommitTime(clockElapsed),
+                    CancellationToken.None);
+                await WriteAudioChunkAsync(writer, audioIndex, audioSamples);
+                await Task.Yield();
+            }
+
+            await writer.WriteVideoAsync(
+                CreateVideoFrame(1, TimeSpan.FromSeconds(5), format, 255, 0, 0),
+                CancellationToken.None);
+            for (var audioIndex = 250; audioIndex < 300; audioIndex++)
+            {
+                var clockElapsed = TimeSpan.FromMilliseconds((audioIndex + 1) * 20);
+                await writer.AdvanceVideoWatermarkAsync(
+                    RecordingTimelinePolicy.GetSafeVideoCommitTime(clockElapsed),
+                    CancellationToken.None);
+                await WriteAudioChunkAsync(writer, audioIndex, audioSamples);
+                await Task.Yield();
+            }
+
+            _ = await writer.FinalizeAsync(TimeSpan.FromSeconds(6), CancellationToken.None);
+            var decoded = await DecodeVideoFramesAsync(ffmpegPath, finalPath);
+            var frameSize = format.Width * format.Height * 4;
+
+            Assert.True(decoded.Length >= frameSize * 180);
+            AssertAllChannelsBelow(decoded.AsSpan(0 * frameSize, frameSize), 40);
+            AssertAllChannelsBelow(decoded.AsSpan(120 * frameSize, frameSize), 40);
+            AssertDominantChannel(decoded.AsSpan(165 * frameSize, frameSize), 0);
+            Assert.Equal(0, writer.LateVideoFrameCount);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task WriterDoesNotLetAStreamTimestampExtendPastTheCanonicalRecordingEnd()
     {
         if (!OperatingSystem.IsMacOS())
@@ -405,16 +525,20 @@ public sealed class FfmpegMediaWriterTests
             timestamp);
     }
 
-    private static async Task WriteAudioChunkAsync(FfmpegMediaWriter writer, int chunkIndex)
+    private static async Task WriteAudioChunkAsync(
+        FfmpegMediaWriter writer,
+        int chunkIndex,
+        float[]? samples = null)
     {
         const int sampleCount = 960;
+        samples ??= new float[sampleCount * 2];
         await writer.WriteAudioAsync(
             new TimedAudioFrame(
                 new AudioFrame(
                     AudioSourceKind.System,
                     new NativeTimestamp(chunkIndex * 20, 1000),
                     sampleCount,
-                    new float[sampleCount * 2],
+                    samples,
                     new AudioFormat(48000, 2)),
                 TimeSpan.FromMilliseconds(chunkIndex * 20)),
             CancellationToken.None);

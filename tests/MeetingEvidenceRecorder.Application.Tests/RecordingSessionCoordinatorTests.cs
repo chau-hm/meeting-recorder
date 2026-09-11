@@ -385,6 +385,7 @@ public sealed class RecordingSessionCoordinatorTests
         Assert.Equal(RecordingState.Completed, completion.State);
         Assert.Contains(TimeSpan.FromMilliseconds(1030), writer.VideoTimestamps);
         Assert.Contains(TimeSpan.FromSeconds(1), writer.AudioTimestamps);
+        Assert.Contains(TimeSpan.FromMilliseconds(250), writer.SafeVideoWatermarks);
     }
 
     [Fact]
@@ -605,6 +606,7 @@ public sealed class RecordingSessionCoordinatorTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public List<TimeSpan> VideoTimestamps { get; } = [];
         public List<TimeSpan> AudioTimestamps { get; } = [];
+        public List<TimeSpan> SafeVideoWatermarks { get; } = [];
 
         public Task InitializeAsync(MediaWriterConfiguration configuration, CancellationToken cancellationToken)
         {
@@ -627,6 +629,15 @@ public sealed class RecordingSessionCoordinatorTests
             if (VideoTimestamps.Count >= 2)
                 SecondVideoWriteEntered.TrySetResult(true);
             await Task.CompletedTask;
+        }
+
+        public ValueTask AdvanceVideoWatermarkAsync(
+            TimeSpan safeThrough,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            SafeVideoWatermarks.Add(safeThrough);
+            return ValueTask.CompletedTask;
         }
 
         public async ValueTask WriteAudioAsync(

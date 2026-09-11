@@ -1401,10 +1401,20 @@ public interface IMediaWriter : IAsyncDisposable
         AudioFrame frame,
         CancellationToken cancellationToken);
 
+    ValueTask AdvanceVideoWatermarkAsync(
+        TimeSpan safeThrough,
+        CancellationToken cancellationToken);
+
     Task FinalizeAsync(
         CancellationToken cancellationToken);
 }
 ```
+
+During active recording, the application supplies this watermark from the canonical
+`RecordingClock` after the bounded video reorder allowance has elapsed. The media writer may
+repeat the last committed video frame only for CFR slots strictly before that watermark; audio
+timestamps must not advance the watermark directly. Finalization remains the authoritative point
+for extending the remaining static video tail to the canonical recording end.
 
 首個 implementation：
 
