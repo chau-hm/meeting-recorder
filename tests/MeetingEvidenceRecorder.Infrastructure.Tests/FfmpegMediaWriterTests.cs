@@ -237,6 +237,7 @@ public sealed class FfmpegMediaWriterTests
 
             Assert.NotNull(blockedAudioWrite);
             await writer.BeginFinalizationAsync(CancellationToken.None);
+            await writer.CompleteVideoTransportAsync(TimeSpan.FromSeconds(40), CancellationToken.None);
             await blockedAudioWrite!.WaitAsync(TimeSpan.FromSeconds(5));
             for (nextAudioIndex++; nextAudioIndex < 2000; nextAudioIndex++)
                 await WriteAudioChunkAsync(writer, nextAudioIndex, audioSamples);
@@ -374,6 +375,7 @@ public sealed class FfmpegMediaWriterTests
             Assert.Equal(0, writer.LateVideoFrameCount);
             Assert.Equal(0, writer.SyntheticVideoFrameCount);
             await writer.BeginFinalizationAsync(CancellationToken.None);
+            await writer.CompleteVideoTransportAsync(TimeSpan.FromSeconds(1), CancellationToken.None);
             await blockedAudioWrite.WaitAsync(TimeSpan.FromSeconds(5));
         }
         finally

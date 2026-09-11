@@ -800,6 +800,11 @@ public sealed class RecordingSessionCoordinatorTests
         public ValueTask BeginFinalizationAsync(CancellationToken cancellationToken) =>
             ValueTask.CompletedTask;
 
+        public Task CompleteVideoTransportAsync(
+            TimeSpan recordingEnd,
+            CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
         public Task CompleteAudioTransportAsync(
             TimeSpan recordingEnd,
             CancellationToken cancellationToken) =>
@@ -922,6 +927,11 @@ public sealed class RecordingSessionCoordinatorTests
             blockedAudioRelease.TrySetResult(true);
             return ValueTask.CompletedTask;
         }
+
+        public Task CompleteVideoTransportAsync(
+            TimeSpan recordingEnd,
+            CancellationToken cancellationToken) =>
+            Task.CompletedTask;
 
         public Task CompleteAudioTransportAsync(
             TimeSpan recordingEnd,

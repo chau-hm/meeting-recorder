@@ -237,25 +237,28 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
 
             if (timestampMapper is { HasOrigin: false })
             {
-                timestampOriginReady?.TrySetException(new RecorderException(new RecorderError(
+                var missingOriginError = new RecorderException(new RecorderError(
                     "AUDIO_SYSTEM_UNAVAILABLE",
                     RecorderErrorSeverity.Fatal,
                     "System audio did not produce an initial timestamp before recording stopped.",
-                    "The shared recording timeline could not be established for both required streams.")));
+                    "The shared recording timeline could not be established for both required streams."));
+                timestampOriginReady?.TrySetException(missingOriginError);
+                throw missingOriginError;
             }
 
             // Let accepted audio drain without waiting for another active-recording video commit.
-            // The audio input is closed before final video extension so FFmpeg can release any
-            // inter-stream wait.
+            // All real video samples must be accepted before the canonical finalization tail is
+            // emitted; that tail then releases any FFmpeg FIFO backpressure for audio.
             await mediaWriter.BeginFinalizationAsync(CancellationToken.None).ConfigureAwait(false);
-            await AwaitPumpAsync(audioPump, sessionToken).ConfigureAwait(false);
             recordingEnd ??= CaptureCanonicalRecordingEnd();
-            var audioTransportCompletion = mediaWriter.CompleteAudioTransportAsync(
-                    recordingEnd.Value,
-                    CancellationToken.None);
-
             await AwaitPumpAsync(videoPump, sessionToken).ConfigureAwait(false);
-            await audioTransportCompletion.ConfigureAwait(false);
+            await mediaWriter.CompleteVideoTransportAsync(
+                recordingEnd.Value,
+                CancellationToken.None).ConfigureAwait(false);
+            await AwaitPumpAsync(audioPump, sessionToken).ConfigureAwait(false);
+            await mediaWriter.CompleteAudioTransportAsync(
+                recordingEnd.Value,
+                CancellationToken.None).ConfigureAwait(false);
 
         }
         catch (Exception exception)

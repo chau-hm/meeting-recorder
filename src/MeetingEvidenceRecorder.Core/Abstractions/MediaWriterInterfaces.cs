@@ -27,6 +27,10 @@ public interface IMediaWriter : IAsyncDisposable
 
     ValueTask BeginFinalizationAsync(CancellationToken cancellationToken);
 
+    Task CompleteVideoTransportAsync(
+        TimeSpan recordingEnd,
+        CancellationToken cancellationToken);
+
     Task CompleteAudioTransportAsync(
         TimeSpan recordingEnd,
         CancellationToken cancellationToken);

@@ -1404,6 +1404,10 @@ public interface IMediaWriter : IAsyncDisposable
     ValueTask BeginFinalizationAsync(
         CancellationToken cancellationToken);
 
+    Task CompleteVideoTransportAsync(
+        TimeSpan recordingEnd,
+        CancellationToken cancellationToken);
+
     Task CompleteAudioTransportAsync(
         TimeSpan recordingEnd,
         CancellationToken cancellationToken);
@@ -2792,11 +2796,11 @@ Disable new hotkey events
         ↓
 Stop capture producers
         ↓
-Drain accepted queues
-        ↓
-Complete canonical audio tail and close the audio input
+Drain accepted video samples
         ↓
 Extend final video tail to the canonical recording end
+        ↓
+Drain accepted audio samples and close the audio input
         ↓
 Flush encoder and close muxer
         ↓
@@ -2806,9 +2810,10 @@ Finalize manifest
 ```
 
 The capture-stop recording end is captured before accepted media drains. The audio transport is
-switched to finalization mode before the audio pump drains, then its canonical tail is written and
-its FIFO is closed before final video extension. Closing the audio input removes the inter-stream
-EOF dependency that can otherwise leave a blocked video FIFO waiting forever for more audio.
+switched to finalization mode before the pumps drain. Once all real video samples are accepted,
+the writer extends the final video tail to the canonical endpoint; this releases any FFmpeg FIFO
+backpressure so accepted audio can drain before its FIFO is closed. Audio never commits future
+video slots during active recording.
 
 唔可以：
 

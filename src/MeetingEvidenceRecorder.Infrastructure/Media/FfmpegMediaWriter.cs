@@ -49,6 +49,7 @@ public sealed class FfmpegMediaWriter : IMediaWriter
     private long maxAudioTransportQueueDepth;
     private bool hasVideo;
     private bool hasAudio;
+    private bool videoTransportCompleted;
     private bool finalized;
     private bool disposed;
 
@@ -156,11 +157,7 @@ public sealed class FfmpegMediaWriter : IMediaWriter
     {
         cancellationToken.ThrowIfCancellationRequested();
         EnsureReady();
-        lock (audioTransportGate)
-        {
-            audioTransportFinalizing = true;
-            audioTransportChanged.TrySetResult(true);
-        }
+        MarkAudioTransportFinalizing();
         return ValueTask.CompletedTask;
     }
 
@@ -168,10 +165,11 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         TimeSpan recordingEnd,
         CancellationToken cancellationToken)
     {
+        await CompleteVideoTransportAsync(recordingEnd, cancellationToken).ConfigureAwait(false);
         await audioGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            EnsureReady();
+            EnsureReady(requireVideoPipe: false);
             await CompleteAudioTransportCoreAsync(recordingEnd, cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -185,7 +183,7 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         TimedAudioFrame timedFrame,
         CancellationToken cancellationToken)
     {
-        EnsureReady();
+        EnsureReady(requireVideoPipe: false);
         var frame = timedFrame.Frame;
         var channels = configuration!.AudioFormat.Channels;
         if (frame.Format.Channels != channels || frame.Format.SampleRate != configuration.AudioFormat.SampleRate)
@@ -233,14 +231,24 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         await finalizationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            EnsureReady();
-            await CompleteAudioTransportAsync(recordingEnd, cancellationToken).ConfigureAwait(false);
+            EnsureReady(requireVideoPipe: false);
+            MarkAudioTransportFinalizing();
             await CompleteVideoTransportAsync(recordingEnd, cancellationToken).ConfigureAwait(false);
+            await CompleteAudioTransportAsync(recordingEnd, cancellationToken).ConfigureAwait(false);
             return await FinalizeCoreAsync(recordingEnd, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
             finalizationGate.Release();
+        }
+    }
+
+    private void MarkAudioTransportFinalizing()
+    {
+        lock (audioTransportGate)
+        {
+            audioTransportFinalizing = true;
+            audioTransportChanged.TrySetResult(true);
         }
     }
 
@@ -355,13 +363,16 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         await CloseAudioInputPipeAsync().ConfigureAwait(false);
     }
 
-    private async Task CompleteVideoTransportAsync(
+    public async Task CompleteVideoTransportAsync(
         TimeSpan targetEnd,
         CancellationToken cancellationToken)
     {
+        MarkAudioTransportFinalizing();
         await videoGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (videoTransportCompleted)
+                return;
             if (!hasVideo || lastVideoFrame is null)
                 throw new MediaWriterException("MEDIA_ENCODER_FAILED", "No video frames were accepted.");
 
@@ -370,6 +381,7 @@ public sealed class FfmpegMediaWriter : IMediaWriter
             await ExtendVideoToTimeAsync(targetEnd, cancellationToken).ConfigureAwait(false);
             await videoPipe!.DisposeAsync().ConfigureAwait(false);
             videoPipe = null;
+            videoTransportCompleted = true;
         }
         finally
         {
