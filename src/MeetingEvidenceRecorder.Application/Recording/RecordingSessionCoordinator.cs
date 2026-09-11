@@ -243,7 +243,6 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
                     "System audio did not produce an initial timestamp before recording stopped.",
                     "The shared recording timeline could not be established for both required streams."));
                 timestampOriginReady?.TrySetException(missingOriginError);
-                throw missingOriginError;
             }
 
             // Let accepted audio drain without waiting for another active-recording video commit.

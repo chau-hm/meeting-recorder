@@ -368,6 +368,7 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         CancellationToken cancellationToken)
     {
         MarkAudioTransportFinalizing();
+        await CloseAudioTransportIfNoSamplesAsync(cancellationToken).ConfigureAwait(false);
         await videoGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -386,6 +387,24 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         finally
         {
             videoGate.Release();
+        }
+    }
+
+    private async Task CloseAudioTransportIfNoSamplesAsync(CancellationToken cancellationToken)
+    {
+        if (Volatile.Read(ref hasAudio) || Volatile.Read(ref audioTransportQueueDepth) > 0)
+            return;
+        if (!await audioGate.WaitAsync(TimeSpan.Zero, cancellationToken).ConfigureAwait(false))
+            return;
+
+        try
+        {
+            if (!hasAudio && audioTransportQueueDepth == 0 && !audioTransportCompleted)
+                await CloseAudioInputPipeAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            audioGate.Release();
         }
     }
 
