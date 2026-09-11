@@ -35,6 +35,7 @@ public sealed class FfmpegMediaWriter : IMediaWriter
     private readonly object audioTransportGate = new();
     private TaskCompletionSource<bool> audioTransportChanged = CreateAudioTransportSignal();
     private bool audioTransportFinalizing;
+    private bool audioTransportCompleted;
     private Process? encoder;
     private Task<string>? encoderErrorTask;
     private readonly SortedDictionary<long, byte[]> pendingVideoFrames = [];
@@ -104,13 +105,30 @@ public sealed class FfmpegMediaWriter : IMediaWriter
 
     public async ValueTask WriteVideoAsync(TimedVideoFrame timedFrame, CancellationToken cancellationToken)
     {
+        var admission = await AdmitVideoFrameAsync(
+                timedFrame,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (admission is not VideoAdmission accepted)
+            return;
+
         await writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             await videoGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                await WriteVideoCoreAsync(timedFrame, cancellationToken).ConfigureAwait(false);
+                EnsureReady();
+                // The watermark may commit an admitted real frame while it waits for the
+                // global gate. That frame is already represented by the real capture data.
+                if (accepted.TargetFrame < nextVideoFrame)
+                    return;
+
+                await CommitVideoFramesAsync(
+                        safeThroughFrameCount: null,
+                        accepted.ExpectedBytes,
+                        cancellationToken)
+                    .ConfigureAwait(false);
             }
             finally
             {
@@ -123,36 +141,40 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         }
     }
 
-    private async ValueTask WriteVideoCoreAsync(
+    private async ValueTask<VideoAdmission?> AdmitVideoFrameAsync(
         TimedVideoFrame timedFrame,
         CancellationToken cancellationToken)
     {
-        EnsureReady();
-        var frame = timedFrame.Frame;
-        var expectedBytes = checked(frame.Format.Width * frame.Format.Height * 4);
-        if (frame.Data.Length != expectedBytes)
-            throw new MediaWriterException("MEDIA_ENCODER_FAILED", "A video frame did not contain tightly packed BGRA data.");
-
-        var targetIndex = Math.Max(0, (long)Math.Round(
-            timedFrame.RecordingTimestamp.TotalSeconds * frame.Format.FramesPerSecond,
-            MidpointRounding.AwayFromZero));
-        EnsureRuntimeVideoGapWithinBound(targetIndex);
-        if (targetIndex < nextVideoFrame)
+        await videoGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            Interlocked.Increment(ref lateVideoFrameCount);
-            return;
-        }
-        if (!pendingVideoFrames.TryAdd(targetIndex, frame.Data.ToArray()))
-        {
-            Interlocked.Increment(ref lateVideoFrameCount);
-            return;
-        }
+            EnsureReady();
+            var frame = timedFrame.Frame;
+            var expectedBytes = checked(frame.Format.Width * frame.Format.Height * 4);
+            if (frame.Data.Length != expectedBytes)
+                throw new MediaWriterException("MEDIA_ENCODER_FAILED", "A video frame did not contain tightly packed BGRA data.");
 
-        await CommitVideoFramesAsync(
-                safeThroughFrameCount: null,
-                expectedBytes,
-                cancellationToken)
-            .ConfigureAwait(false);
+            var targetIndex = Math.Max(0, (long)Math.Round(
+                timedFrame.RecordingTimestamp.TotalSeconds * frame.Format.FramesPerSecond,
+                MidpointRounding.AwayFromZero));
+            EnsureRuntimeVideoGapWithinBound(targetIndex);
+            if (targetIndex < nextVideoFrame)
+            {
+                Interlocked.Increment(ref lateVideoFrameCount);
+                return null;
+            }
+            if (!pendingVideoFrames.TryAdd(targetIndex, frame.Data.ToArray()))
+            {
+                Interlocked.Increment(ref lateVideoFrameCount);
+                return null;
+            }
+
+            return new VideoAdmission(targetIndex, expectedBytes);
+        }
+        finally
+        {
+            videoGate.Release();
+        }
     }
 
     public async ValueTask WriteAudioAsync(TimedAudioFrame timedFrame, CancellationToken cancellationToken)
@@ -161,6 +183,35 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         try
         {
             await WriteAudioCoreAsync(timedFrame, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            writeGate.Release();
+        }
+    }
+
+    public ValueTask BeginFinalizationAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        EnsureReady();
+        lock (audioTransportGate)
+        {
+            audioTransportFinalizing = true;
+            audioTransportChanged.TrySetResult(true);
+        }
+        return ValueTask.CompletedTask;
+    }
+
+    public async Task CompleteAudioTransportAsync(
+        TimeSpan recordingEnd,
+        CancellationToken cancellationToken)
+    {
+        await writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            EnsureReady();
+            await CompleteAudioTransportCoreAsync(recordingEnd, cancellationToken)
+                .ConfigureAwait(false);
         }
         finally
         {
@@ -250,9 +301,17 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         await writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            EnsureReady();
+            var audioCompletion = CompleteAudioTransportCoreAsync(
+                recordingEnd,
+                cancellationToken);
             await videoGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
+                var videoCompletion = CompleteVideoTransportCoreAsync(
+                    recordingEnd,
+                    cancellationToken);
+                await Task.WhenAll(audioCompletion, videoCompletion).ConfigureAwait(false);
                 return await FinalizeCoreAsync(recordingEnd, cancellationToken).ConfigureAwait(false);
             }
             finally
@@ -270,7 +329,7 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         TimeSpan recordingEnd,
         CancellationToken cancellationToken)
     {
-        EnsureReady();
+        EnsureReady(requireVideoPipe: false);
         if (finalized)
             throw new InvalidOperationException("The media writer has already been finalized.");
         if (recordingEnd < TimeSpan.Zero)
@@ -280,7 +339,6 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         if (!hasAudio)
             throw new MediaWriterException("AUDIO_SYSTEM_UNAVAILABLE", "No system-audio samples were accepted.");
 
-        await ExtendInputsToRecordingEndAsync(recordingEnd, cancellationToken).ConfigureAwait(false);
         finalized = true;
         await CloseInputPipesAsync().ConfigureAwait(false);
         await encoder!.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
@@ -318,16 +376,22 @@ public sealed class FfmpegMediaWriter : IMediaWriter
             result.HasAudio);
     }
 
-    private async Task ExtendInputsToRecordingEndAsync(
+    private async Task CompleteAudioTransportCoreAsync(
         TimeSpan recordingEnd,
         CancellationToken cancellationToken)
     {
+        if (audioTransportCompleted)
+            return;
+
         var writerConfiguration = configuration!;
-        // Capture has stopped and both accepted queues have drained before this method is
-        // called. Only the canonical recording end may advance media now; source stream ends
-        // are never allowed to redefine the final duration. Queue the bounded audio alignment
-        // first so FFmpeg is not left waiting for audio while the final CFR video frames are
-        // being written to the raw-video FIFO.
+        if (recordingEnd < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(recordingEnd), "Recording end cannot be negative.");
+        if (!hasAudio)
+            throw new MediaWriterException("AUDIO_SYSTEM_UNAVAILABLE", "No system-audio samples were accepted.");
+
+        // Capture has stopped and the accepted audio queue has drained before this method is
+        // called by the coordinator. Only the canonical recording end may advance media now;
+        // source stream ends are never allowed to redefine the final duration.
         var targetVideoFrames = checked((long)Math.Ceiling(
             recordingEnd.TotalSeconds * writerConfiguration.VideoFormat.FramesPerSecond));
         var targetVideoEndSamples = checked((long)Math.Ceiling(
@@ -360,11 +424,18 @@ public sealed class FfmpegMediaWriter : IMediaWriter
             nextAudioSample = targetAudioSamples;
         }
 
-        await ExtendVideoToTimeAsync(
-                recordingEnd,
-                cancellationToken,
-                allowLargeGap: true)
+        await CloseAudioInputPipeAsync().ConfigureAwait(false);
+    }
+
+    private async Task CompleteVideoTransportCoreAsync(
+        TimeSpan targetEnd,
+        CancellationToken cancellationToken,
+        bool allowLargeGap = false)
+    {
+        await ExtendVideoToTimeAsync(targetEnd, cancellationToken, allowLargeGap)
             .ConfigureAwait(false);
+        await videoPipe!.DisposeAsync().ConfigureAwait(false);
+        videoPipe = null;
     }
 
     private async Task ExtendVideoToTimeAsync(
@@ -576,14 +647,8 @@ public sealed class FfmpegMediaWriter : IMediaWriter
             throw new MediaWriterException("MEDIA_MUX_FAILED", error.Trim());
     }
 
-    private async Task CloseInputPipesAsync()
+    private async Task CloseAudioInputPipeAsync()
     {
-        if (videoPipe is not null)
-        {
-            await videoPipe.DisposeAsync().ConfigureAwait(false);
-            videoPipe = null;
-        }
-
         Exception? transportFailure = null;
         if (audioWriteQueue is not null)
         {
@@ -606,7 +671,6 @@ public sealed class FfmpegMediaWriter : IMediaWriter
                     audioWriterTask = null;
                 }
             }
-            audioWriteQueue = null;
         }
 
         if (audioPipe is not null)
@@ -615,8 +679,21 @@ public sealed class FfmpegMediaWriter : IMediaWriter
             audioPipe = null;
         }
 
+        audioTransportCompleted = true;
         if (transportFailure is not null)
             throw transportFailure;
+    }
+
+    private async Task CloseInputPipesAsync()
+    {
+        if (videoPipe is not null)
+        {
+            await videoPipe.DisposeAsync().ConfigureAwait(false);
+            videoPipe = null;
+        }
+
+        await CloseAudioInputPipeAsync().ConfigureAwait(false);
+        audioWriteQueue = null;
     }
 
     private async Task WriteSilenceAsync(long sampleCount, CancellationToken cancellationToken)
@@ -830,6 +907,7 @@ public sealed class FfmpegMediaWriter : IMediaWriter
     private static extern int NativeClose(int fileDescriptor);
 
     private readonly record struct AudioTransportChunk(byte[] Bytes, long RequiredVideoFrame);
+    private readonly record struct VideoAdmission(long TargetFrame, int ExpectedBytes);
 
     private static string ValidateExecutable(string path, string parameterName)
     {
@@ -846,11 +924,11 @@ public sealed class FfmpegMediaWriter : IMediaWriter
             File.Delete(path);
     }
 
-    private void EnsureReady()
+    private void EnsureReady(bool requireVideoPipe = true)
     {
         if (disposed)
             throw new ObjectDisposedException(nameof(FfmpegMediaWriter));
-        if (configuration is null || encoder is null || videoPipe is null || audioWriteQueue is null ||
+        if (configuration is null || encoder is null || (requireVideoPipe && videoPipe is null) || audioWriteQueue is null ||
             audioTransportCancellation is null || audioPipeOpenTask is null)
             throw new InvalidOperationException("The media writer has not been initialized.");
     }

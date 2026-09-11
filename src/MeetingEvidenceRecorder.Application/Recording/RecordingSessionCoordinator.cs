@@ -251,18 +251,17 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
                     "The shared recording timeline could not be established for both required streams.")));
             }
 
-            // Keep watermark progress alive while accepted media drains. A blocked audio write
-            // can own the writer gate while a video write waits behind it; the watermark pump is
-            // the independent path that releases the audio transport dependency.
-            await AwaitPumpAsync(videoPump, sessionToken).ConfigureAwait(false);
-            // Capture has stopped and the video pump has drained, so no later real frame can
-            // occupy an active-recording slot. Release the bounded audio tail before waiting for
-            // the audio pump; FinalizeAsync still owns the canonical end extension.
-            await mediaWriter.AdvanceVideoWatermarkAsync(
-                    clock.Elapsed,
-                    CancellationToken.None)
-                .ConfigureAwait(false);
+            // Let accepted audio drain without waiting for a video watermark. The audio input is
+            // closed before final video extension so FFmpeg can release any inter-stream wait.
+            await mediaWriter.BeginFinalizationAsync(CancellationToken.None).ConfigureAwait(false);
             await AwaitPumpAsync(audioPump, sessionToken).ConfigureAwait(false);
+            recordingEnd ??= clock.Elapsed;
+            var audioTransportCompletion = mediaWriter.CompleteAudioTransportAsync(
+                    recordingEnd.Value,
+                    CancellationToken.None);
+
+            await AwaitPumpAsync(videoPump, sessionToken).ConfigureAwait(false);
+            await audioTransportCompletion.ConfigureAwait(false);
 
             videoWatermarkCancellation?.Cancel();
             await AwaitPumpForShutdownAsync(videoWatermarkPump, []).ConfigureAwait(false);

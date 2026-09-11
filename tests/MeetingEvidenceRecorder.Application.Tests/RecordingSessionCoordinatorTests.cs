@@ -781,6 +781,14 @@ public sealed class RecordingSessionCoordinatorTests
             await Task.CompletedTask;
         }
 
+        public ValueTask BeginFinalizationAsync(CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+
+        public Task CompleteAudioTransportAsync(
+            TimeSpan recordingEnd,
+            CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
         public Task<FinalizedMedia> FinalizeAsync(
             TimeSpan recordingEnd,
             CancellationToken cancellationToken)
@@ -890,6 +898,14 @@ public sealed class RecordingSessionCoordinatorTests
                 writeGate.Release();
             }
         }
+
+        public ValueTask BeginFinalizationAsync(CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
+
+        public Task CompleteAudioTransportAsync(
+            TimeSpan recordingEnd,
+            CancellationToken cancellationToken) =>
+            Task.CompletedTask;
 
         public ValueTask AdvanceVideoWatermarkAsync(
             TimeSpan safeThrough,

@@ -25,6 +25,12 @@ public interface IMediaWriter : IAsyncDisposable
 
     ValueTask WriteAudioAsync(TimedAudioFrame frame, CancellationToken cancellationToken);
 
+    ValueTask BeginFinalizationAsync(CancellationToken cancellationToken);
+
+    Task CompleteAudioTransportAsync(
+        TimeSpan recordingEnd,
+        CancellationToken cancellationToken);
+
     ValueTask AdvanceVideoWatermarkAsync(
         TimeSpan safeThrough,
         CancellationToken cancellationToken);

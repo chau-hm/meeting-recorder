@@ -314,6 +314,79 @@ public sealed class FfmpegMediaWriterTests
     }
 
     [Fact]
+    public async Task WriterAdmitsRealVideoBeforeAudioBackpressureCanAdvanceTheWatermark()
+    {
+        if (!OperatingSystem.IsMacOS())
+            throw SkipException.ForSkip("The FIFO media writer is macOS-specific.");
+
+        var ffmpegPath = FindExecutable("MEETING_RECORDER_FFMPEG", "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg");
+        var ffprobePath = FindExecutable("MEETING_RECORDER_FFPROBE", "/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe");
+        var root = Path.Combine(Path.GetTempPath(), $"meeting-recorder-video-admission-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var format = new VideoFormat(1, 1, 30);
+            var workDirectory = Path.Combine(root, ".work");
+            await using var writer = new FfmpegMediaWriter(ffmpegPath, ffprobePath);
+            await writer.InitializeAsync(
+                new MediaWriterConfiguration(
+                    workDirectory,
+                    Path.Combine(workDirectory, "recording.partial.mkv"),
+                    Path.Combine(root, "recording.mp4"),
+                    format,
+                    new AudioFormat(48000, 2)),
+                CancellationToken.None);
+
+            await writer.WriteVideoAsync(
+                CreateVideoFrame(0, TimeSpan.Zero, format, 0, 0, 0),
+                CancellationToken.None);
+
+            Task? blockedAudioWrite = null;
+            for (var audioIndex = 0; audioIndex < 2048; audioIndex++)
+            {
+                var audioWrite = WriteAudioChunkAsync(writer, audioIndex);
+                await Task.Yield();
+                if (!audioWrite.IsCompleted)
+                {
+                    blockedAudioWrite = audioWrite;
+                    break;
+                }
+
+                await audioWrite;
+            }
+
+            Assert.NotNull(blockedAudioWrite);
+            Assert.False(blockedAudioWrite!.IsCompleted);
+
+            var realVideoWrite = writer.WriteVideoAsync(
+                CreateVideoFrame(
+                    1,
+                    TimeSpan.FromMilliseconds(33.333),
+                    format,
+                    255,
+                    0,
+                    0),
+                CancellationToken.None).AsTask();
+            await Task.Yield();
+            Assert.False(realVideoWrite.IsCompleted);
+
+            await writer.AdvanceVideoWatermarkAsync(
+                TimeSpan.FromSeconds(25),
+                CancellationToken.None);
+            await blockedAudioWrite.WaitAsync(TimeSpan.FromSeconds(5));
+            await realVideoWrite.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Equal(0, writer.LateVideoFrameCount);
+            Assert.Equal(748, writer.SyntheticVideoFrameCount);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task WriterDoesNotLetAStreamTimestampExtendPastTheCanonicalRecordingEnd()
     {
         if (!OperatingSystem.IsMacOS())

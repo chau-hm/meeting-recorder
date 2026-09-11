@@ -1401,6 +1401,13 @@ public interface IMediaWriter : IAsyncDisposable
         AudioFrame frame,
         CancellationToken cancellationToken);
 
+    ValueTask BeginFinalizationAsync(
+        CancellationToken cancellationToken);
+
+    Task CompleteAudioTransportAsync(
+        TimeSpan recordingEnd,
+        CancellationToken cancellationToken);
+
     ValueTask AdvanceVideoWatermarkAsync(
         TimeSpan safeThrough,
         CancellationToken cancellationToken);
@@ -1415,6 +1422,12 @@ During active recording, the application supplies this watermark from the canoni
 repeat the last committed video frame only for CFR slots strictly before that watermark; audio
 timestamps must not advance the watermark directly. Finalization remains the authoritative point
 for extending the remaining static video tail to the canonical recording end.
+
+Real video admission is performed under the video scheduling gate before a frame waits on the
+global media serialization gate. This keeps accepted real frames visible to watermark scheduling
+while audio transport is under bounded backpressure; if the watermark commits an admitted frame,
+the later serialized write completion treats it as already committed real evidence rather than as
+a late frame.
 
 首個 implementation：
 
@@ -2788,13 +2801,11 @@ Disable new hotkey events
         ↓
 Stop capture producers
         ↓
-Keep canonical-clock video watermark progress available
+Allow accepted audio to drain without waiting for video coverage
         ↓
-Drain accepted audio/video media
+Complete canonical audio tail and close the audio input
         ↓
-Advance the final active watermark after video input is drained
-        ↓
-Drain the remaining bounded audio tail
+Drain accepted video while canonical-clock watermark progress remains available
         ↓
 Stop the watermark progress mechanism
         ↓
@@ -2811,7 +2822,10 @@ Finalize manifest
 
 The capture-stop recording end is captured before accepted media drains. Watermark progress
 must remain available during that drain because it can be the mechanism that releases bounded
-audio backpressure; stopping it first can leave the video and audio pumps waiting on each other.
+audio backpressure. The audio transport is switched to finalization mode before the audio pump
+drains, then its canonical tail is written and its FIFO is closed before final video extension.
+Closing the audio input removes the inter-stream EOF dependency that can otherwise leave a blocked
+video FIFO waiting forever for more audio.
 
 唔可以：
 
