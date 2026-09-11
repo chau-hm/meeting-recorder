@@ -1,6 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="../MeetingEvidenceRecorder.Core/MeetingEvidenceRecorder.Core.csproj" />
-    <ProjectReference Include="../MeetingEvidenceRecorder.Application/MeetingEvidenceRecorder.Application.csproj" />
   </ItemGroup>
 </Project>

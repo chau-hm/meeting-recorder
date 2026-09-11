@@ -980,6 +980,19 @@ SourceTimestamp
 
 實際 implementation 必須避免只用 callback arrival time。
 
+`RecordingClock` starts before native capture, so its elapsed value includes capture startup and
+delivery time that are not part of the normalized native media position. When the first video and
+system-audio timestamps are both available, the coordinator records the clock elapsed value of the
+stream that owns the shared earliest native origin as `MediaClockOffset`. Forward source checks use
+the aligned progress:
+
+```text
+ExpectedMediaProgress = max(0, RecordingClock.Elapsed - MediaClockOffset)
+```
+
+Startup and delivery latency therefore do not look like stale media. Stream-relative monotonicity
+and bounded reorder/overlap checks remain independent of this clock alignment.
+
 ---
 
 # 23. Screenshot Architecture
@@ -1397,14 +1410,37 @@ public interface IMediaWriter : IAsyncDisposable
         EncodedOrRawVideoFrame frame,
         CancellationToken cancellationToken);
 
+    Task AdvanceVideoWatermarkAsync(
+        TimeSpan canonicalEnd,
+        CancellationToken cancellationToken);
+
     ValueTask WriteAudioAsync(
         AudioFrame frame,
+        CancellationToken cancellationToken);
+
+    ValueTask BeginFinalizationAsync(
+        CancellationToken cancellationToken);
+
+    Task CompleteVideoTransportAsync(
+        TimeSpan recordingEnd,
+        CancellationToken cancellationToken);
+
+    Task CompleteAudioTransportAsync(
+        TimeSpan recordingEnd,
         CancellationToken cancellationToken);
 
     Task FinalizeAsync(
         CancellationToken cancellationToken);
 }
 ```
+
+During active recording, `WriteVideoAsync` commits real video content and may repeat the last real
+frame for missing CFR slots before a later real frame. The coordinator also advances a bounded,
+holdback-limited video watermark from aligned media progress (`RecordingClock` minus
+`MediaClockOffset`); this keeps static-screen recordings live without allowing audio timestamps to
+choose future video content. Audio transport is independently bounded and does not wait for video
+coverage. Finalization remains the only path allowed to extend the final static tail to the
+canonical `RecordingClock` value supplied by the coordinator.
 
 首個 implementation：
 
@@ -2778,18 +2814,24 @@ Disable new hotkey events
         ↓
 Stop capture producers
         ↓
-Drain queues
+Drain accepted video samples
         ↓
-Stop audio mixer
+Extend final video tail to the canonical recording end
         ↓
-Flush encoder
+Drain accepted audio samples and close the audio input
         ↓
-Close muxer
+Flush encoder and close muxer
         ↓
-Finalize media
+Finalize media at the capture-stop recording end
         ↓
 Finalize manifest
 ```
+
+The capture-stop recording end is captured before accepted media drains. The audio transport is
+switched to finalization mode before the pumps drain. Once all real video samples are accepted,
+the writer extends the final video tail to the canonical endpoint; this releases any FFmpeg FIFO
+backpressure so accepted audio can drain before its FIFO is closed. Audio never commits future
+video slots during active recording.
 
 唔可以：
 
