@@ -194,7 +194,7 @@ public sealed class FfmpegMediaWriterTests
     }
 
     [Fact]
-    public async Task WriterKeepsAudioTransportFlowingDuringLongStaticVideo()
+    public async Task WriterKeepsActiveAudioTransportFlowingDuringLongStaticVideo()
     {
         if (!OperatingSystem.IsMacOS())
             throw SkipException.ForSkip("The FIFO media writer is macOS-specific.");
@@ -220,36 +220,34 @@ public sealed class FfmpegMediaWriterTests
 
             await writer.WriteVideoAsync(CreateVideoFrame(0, TimeSpan.Zero, format, 127, 127, 127), CancellationToken.None);
             var audioSamples = new float[960 * 2];
-            Task? blockedAudioWrite = null;
-            var nextAudioIndex = 0;
-            for (; nextAudioIndex < 2000; nextAudioIndex++)
+            var audioTask = Task.Run(async () =>
             {
-                var audioWrite = WriteAudioChunkAsync(writer, nextAudioIndex, audioSamples);
-                await Task.Yield();
-                if (!audioWrite.IsCompleted)
+                for (var audioIndex = 0; audioIndex < 3000; audioIndex++)
+                    await WriteAudioChunkAsync(writer, audioIndex, audioSamples);
+            });
+            var watermarkTask = Task.Run(async () =>
+            {
+                for (var audioIndex = 0; audioIndex < 3000; audioIndex++)
                 {
-                    blockedAudioWrite = audioWrite;
-                    break;
+                    await writer.AdvanceVideoWatermarkAsync(
+                        TimeSpan.FromMilliseconds((audioIndex + 1) * 20),
+                        CancellationToken.None);
+                    await Task.Yield();
                 }
+            });
 
-                await audioWrite;
-            }
+            await Task.WhenAll(audioTask, watermarkTask).WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.False(File.Exists(finalPath), "Active audio must not require finalization to make progress.");
+            Assert.True(writer.SyntheticVideoFrameCount >= 1700);
+            Assert.InRange(writer.MaxAudioTransportQueueDepth, 1, 1024 + 2);
 
-            Assert.NotNull(blockedAudioWrite);
-            await writer.BeginFinalizationAsync(CancellationToken.None);
-            await writer.CompleteVideoTransportAsync(TimeSpan.FromSeconds(40), CancellationToken.None);
-            await blockedAudioWrite!.WaitAsync(TimeSpan.FromSeconds(5));
-            for (nextAudioIndex++; nextAudioIndex < 2000; nextAudioIndex++)
-                await WriteAudioChunkAsync(writer, nextAudioIndex, audioSamples);
-
-            var finalized = await writer.FinalizeAsync(TimeSpan.FromSeconds(40), CancellationToken.None);
+            var finalized = await writer.FinalizeAsync(TimeSpan.FromSeconds(60), CancellationToken.None);
             var probe = await new FfmpegMediaProbe(ffprobePath).ProbeAsync(finalPath, CancellationToken.None);
 
-            Assert.InRange(finalized.Duration.TotalSeconds, 39.5, 40.5);
-            Assert.InRange(probe.VideoDuration!.Value.TotalSeconds, 39.5, 40.5);
-            Assert.InRange(probe.AudioDuration!.Value.TotalSeconds, 39.5, 40.5);
-            Assert.InRange(probe.Duration.TotalSeconds, 39.5, 40.5);
-            Assert.InRange(writer.MaxAudioTransportQueueDepth, 1, 1024 + 2);
+            Assert.InRange(finalized.Duration.TotalSeconds, 59.5, 60.5);
+            Assert.InRange(probe.VideoDuration!.Value.TotalSeconds, 59.5, 60.5);
+            Assert.InRange(probe.AudioDuration!.Value.TotalSeconds, 59.5, 60.5);
+            Assert.InRange(probe.Duration.TotalSeconds, 59.5, 60.5);
         }
         finally
         {
@@ -285,29 +283,40 @@ public sealed class FfmpegMediaWriterTests
 
             await writer.WriteVideoAsync(CreateVideoFrame(0, TimeSpan.Zero, format, 0, 0, 0), CancellationToken.None);
             var audioSamples = new float[960 * 2];
-            for (var audioIndex = 0; audioIndex < 250; audioIndex++)
+            for (var audioIndex = 0; audioIndex < 1500; audioIndex++)
             {
                 await WriteAudioChunkAsync(writer, audioIndex, audioSamples);
-                await Task.Yield();
+                if (audioIndex % 10 == 0)
+                {
+                    await writer.AdvanceVideoWatermarkAsync(
+                        TimeSpan.FromMilliseconds((audioIndex + 1) * 20),
+                        CancellationToken.None);
+                }
             }
 
             await writer.WriteVideoAsync(
-                CreateVideoFrame(1, TimeSpan.FromSeconds(5), format, 255, 0, 0),
+                CreateVideoFrame(1, TimeSpan.FromSeconds(30), format, 255, 0, 0),
                 CancellationToken.None);
-            for (var audioIndex = 250; audioIndex < 300; audioIndex++)
+            for (var audioIndex = 1500; audioIndex < 1750; audioIndex++)
             {
                 await WriteAudioChunkAsync(writer, audioIndex, audioSamples);
-                await Task.Yield();
+                if (audioIndex % 10 == 0)
+                {
+                    await writer.AdvanceVideoWatermarkAsync(
+                        TimeSpan.FromMilliseconds((audioIndex + 1) * 20 - 1000),
+                        CancellationToken.None);
+                }
             }
 
-            _ = await writer.FinalizeAsync(TimeSpan.FromSeconds(6), CancellationToken.None);
+            _ = await writer.FinalizeAsync(TimeSpan.FromSeconds(35), CancellationToken.None);
             var decoded = await DecodeVideoFramesAsync(ffmpegPath, finalPath);
             var frameSize = format.Width * format.Height * 4;
 
-            Assert.True(decoded.Length >= frameSize * 180);
+            Assert.True(decoded.Length >= frameSize * 1050);
             AssertAllChannelsBelow(decoded.AsSpan(0 * frameSize, frameSize), 40);
-            AssertAllChannelsBelow(decoded.AsSpan(120 * frameSize, frameSize), 40);
-            AssertDominantChannel(decoded.AsSpan(165 * frameSize, frameSize), 0);
+            AssertAllChannelsBelow(decoded.AsSpan(450 * frameSize, frameSize), 40);
+            AssertDominantChannelNear(decoded, frameSize, 900, 0, 15);
+            AssertDominantChannel(decoded.AsSpan(1020 * frameSize, frameSize), 0);
             Assert.Equal(0, writer.LateVideoFrameCount);
         }
         finally
@@ -318,7 +327,7 @@ public sealed class FfmpegMediaWriterTests
     }
 
     [Fact]
-    public async Task WriterAdmitsRealVideoBeforeAudioBackpressureCanAdvanceTheWatermark()
+    public async Task WriterAllowsActiveAudioWithoutVideoCoverage()
     {
         if (!OperatingSystem.IsMacOS())
             throw SkipException.ForSkip("The FIFO media writer is macOS-specific.");
@@ -345,38 +354,10 @@ public sealed class FfmpegMediaWriterTests
                 CreateVideoFrame(0, TimeSpan.Zero, format, 0, 0, 0),
                 CancellationToken.None);
 
-            Task? blockedAudioWrite = null;
-            for (var audioIndex = 0; audioIndex < 2048; audioIndex++)
-            {
-                var audioWrite = WriteAudioChunkAsync(writer, audioIndex);
-                await Task.Yield();
-                if (!audioWrite.IsCompleted)
-                {
-                    blockedAudioWrite = audioWrite;
-                    break;
-                }
-
-                await audioWrite;
-            }
-
-            Assert.NotNull(blockedAudioWrite);
-            Assert.False(blockedAudioWrite!.IsCompleted);
-
-            var realVideoWrite = writer.WriteVideoAsync(
-                CreateVideoFrame(
-                    1,
-                    TimeSpan.FromMilliseconds(33.333),
-                    format,
-                    255,
-                    0,
-                    0),
-                CancellationToken.None).AsTask();
-            await realVideoWrite.WaitAsync(TimeSpan.FromSeconds(5));
-            Assert.Equal(0, writer.LateVideoFrameCount);
+            await WriteAudioChunkAsync(writer, 0);
+            await WriteAudioChunkAsync(writer, 1);
             Assert.Equal(0, writer.SyntheticVideoFrameCount);
-            await writer.BeginFinalizationAsync(CancellationToken.None);
-            await writer.CompleteVideoTransportAsync(TimeSpan.FromSeconds(1), CancellationToken.None);
-            await blockedAudioWrite.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(0, writer.LateVideoFrameCount);
         }
         finally
         {
@@ -438,7 +419,7 @@ public sealed class FfmpegMediaWriterTests
     }
 
     [Fact]
-    public async Task WriterRejectsHugeActiveVideoGapBeforeGeneratingPadding()
+    public async Task WriterAcceptsLongActiveVideoGapWhenCanonicalWatermarkAdvances()
     {
         if (!OperatingSystem.IsMacOS())
             throw SkipException.ForSkip("The FIFO media writer is macOS-specific.");
@@ -461,13 +442,13 @@ public sealed class FfmpegMediaWriterTests
                 CancellationToken.None);
 
             await writer.WriteVideoAsync(CreateVideoFrame(0, TimeSpan.Zero, format, 0, 0, 0), CancellationToken.None);
-            var exception = await Assert.ThrowsAsync<MediaWriterException>(() =>
-                writer.WriteVideoAsync(
-                    CreateVideoFrame(1, TimeSpan.FromSeconds(100), format, 255, 0, 0),
-                    CancellationToken.None).AsTask());
+            await writer.AdvanceVideoWatermarkAsync(TimeSpan.FromSeconds(30), CancellationToken.None);
+            await writer.WriteVideoAsync(
+                CreateVideoFrame(1, TimeSpan.FromSeconds(30), format, 255, 0, 0),
+                CancellationToken.None);
 
-            Assert.Equal("MEDIA_ENCODER_FAILED", exception.Code);
-            Assert.Equal(0, writer.SyntheticVideoFrameCount);
+            Assert.True(writer.SyntheticVideoFrameCount >= 899);
+            Assert.Equal(0, writer.LateVideoFrameCount);
         }
         finally
         {
@@ -804,6 +785,36 @@ public sealed class FfmpegMediaWriterTests
         averages = averages.Select(value => value / pixels).ToArray();
         var otherMaximum = averages.Where((_, index) => index != channel).Max();
         Assert.True(averages[channel] > otherMaximum + 30);
+    }
+
+    private static void AssertDominantChannelNear(
+        byte[] decoded,
+        int frameSize,
+        int expectedFrame,
+        int channel,
+        int radius)
+    {
+        var firstFrame = Math.Max(0, expectedFrame - radius);
+        var lastFrame = Math.Min(decoded.Length / frameSize - 1, expectedFrame + radius);
+        for (var frameIndex = firstFrame; frameIndex <= lastFrame; frameIndex++)
+        {
+            var frame = decoded.AsSpan(frameIndex * frameSize, frameSize);
+            var averages = new double[3];
+            var pixels = frame.Length / 4;
+            for (var offset = 0; offset < frame.Length; offset += 4)
+            {
+                averages[0] += frame[offset];
+                averages[1] += frame[offset + 1];
+                averages[2] += frame[offset + 2];
+            }
+
+            averages = averages.Select(value => value / pixels).ToArray();
+            var otherMaximum = averages.Where((_, index) => index != channel).Max();
+            if (averages[channel] > otherMaximum + 30)
+                return;
+        }
+
+        Assert.Fail($"No frame near {expectedFrame} had dominant channel {channel}.");
     }
 
     private static SessionManifest CreateCandidate(FinalizedMedia finalized) =>

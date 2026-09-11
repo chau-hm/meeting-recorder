@@ -1397,6 +1397,10 @@ public interface IMediaWriter : IAsyncDisposable
         EncodedOrRawVideoFrame frame,
         CancellationToken cancellationToken);
 
+    Task AdvanceVideoWatermarkAsync(
+        TimeSpan canonicalEnd,
+        CancellationToken cancellationToken);
+
     ValueTask WriteAudioAsync(
         AudioFrame frame,
         CancellationToken cancellationToken);
@@ -1417,12 +1421,12 @@ public interface IMediaWriter : IAsyncDisposable
 }
 ```
 
-During active recording, only `WriteVideoAsync` may advance committed video content. When a later
-real frame arrives, the writer may repeat the last real frame for missing CFR slots before that
-frame and then writes the real frame at its normalized position. Audio transport is independently
-bounded and may wait for real video coverage, but it never commits video slots. Finalization is the
-only path allowed to extend a static tail, and its endpoint is the canonical `RecordingClock`
-value supplied by the coordinator.
+During active recording, `WriteVideoAsync` commits real video content and may repeat the last real
+frame for missing CFR slots before a later real frame. The coordinator also advances a bounded,
+holdback-limited video watermark from `RecordingClock`; this keeps static-screen recordings live
+without allowing audio timestamps to choose future video content. Audio transport is independently
+bounded and does not wait for video coverage. Finalization remains the only path allowed to extend
+the final static tail to the canonical `RecordingClock` value supplied by the coordinator.
 
 首個 implementation：
 

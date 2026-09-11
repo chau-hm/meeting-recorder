@@ -33,9 +33,6 @@ public sealed class FfmpegMediaWriter : IMediaWriter
     private Task? audioWriterTask;
     private Exception? audioWriterFailure;
     private CancellationTokenSource? audioTransportCancellation;
-    private readonly object audioTransportGate = new();
-    private TaskCompletionSource<bool> audioTransportChanged = CreateAudioTransportSignal();
-    private bool audioTransportFinalizing;
     private bool audioTransportCompleted;
     private Process? encoder;
     private Task<string>? encoderErrorTask;
@@ -118,7 +115,6 @@ public sealed class FfmpegMediaWriter : IMediaWriter
             var targetIndex = Math.Max(0, (long)Math.Round(
                 timedFrame.RecordingTimestamp.TotalSeconds * frame.Format.FramesPerSecond,
                 MidpointRounding.AwayFromZero));
-            EnsureRuntimeVideoGapWithinBound(targetIndex);
             if (targetIndex < nextVideoFrame)
             {
                 Interlocked.Increment(ref lateVideoFrameCount);
@@ -133,6 +129,30 @@ public sealed class FfmpegMediaWriter : IMediaWriter
                     expectedBytes,
                     cancellationToken)
                 .ConfigureAwait(false);
+        }
+        finally
+        {
+            videoGate.Release();
+        }
+    }
+
+    public async Task AdvanceVideoWatermarkAsync(
+        TimeSpan canonicalEnd,
+        CancellationToken cancellationToken)
+    {
+        await videoGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            EnsureReady();
+            if (canonicalEnd < TimeSpan.Zero)
+                throw new ArgumentOutOfRangeException(nameof(canonicalEnd), "The canonical video watermark cannot be negative.");
+            if (!hasVideo || lastVideoFrame is null)
+                return;
+
+            // The coordinator supplies a watermark derived from RecordingClock. This is the
+            // only active-recording path that may synthesize static coverage; audio transport
+            // never chooses a video endpoint.
+            await ExtendVideoToTimeAsync(canonicalEnd, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -157,7 +177,6 @@ public sealed class FfmpegMediaWriter : IMediaWriter
     {
         cancellationToken.ThrowIfCancellationRequested();
         EnsureReady();
-        MarkAudioTransportFinalizing();
         return ValueTask.CompletedTask;
     }
 
@@ -201,7 +220,7 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         {
             var missingSamples = targetSample - nextAudioSample;
             var maximumGapSamples = checked((long)Math.Ceiling(
-                RecordingTimelinePolicy.MaximumRuntimeWriterGap.TotalSeconds * frame.Format.SampleRate));
+                RecordingTimelinePolicy.MaximumActiveAudioFillGap.TotalSeconds * frame.Format.SampleRate));
             if (missingSamples > maximumGapSamples)
             {
                 throw new MediaWriterException(
@@ -231,7 +250,6 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         try
         {
             EnsureReady(requireVideoPipe: false);
-            MarkAudioTransportFinalizing();
             await CompleteVideoTransportAsync(recordingEnd, cancellationToken).ConfigureAwait(false);
             await CompleteAudioTransportAsync(recordingEnd, cancellationToken).ConfigureAwait(false);
             return await FinalizeCoreAsync(recordingEnd, cancellationToken).ConfigureAwait(false);
@@ -239,15 +257,6 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         finally
         {
             finalizationGate.Release();
-        }
-    }
-
-    private void MarkAudioTransportFinalizing()
-    {
-        lock (audioTransportGate)
-        {
-            audioTransportFinalizing = true;
-            audioTransportChanged.TrySetResult(true);
         }
     }
 
@@ -346,12 +355,6 @@ public sealed class FfmpegMediaWriter : IMediaWriter
                 "Accepted system-audio coverage is materially shorter than the canonical recording timeline.");
         }
 
-        lock (audioTransportGate)
-        {
-            audioTransportFinalizing = true;
-            audioTransportChanged.TrySetResult(true);
-        }
-
         if (missingAudioSamples > 0 && missingAudioSamples <= maximumTailSamples)
         {
             await WriteSilenceAsync(missingAudioSamples, cancellationToken)
@@ -366,7 +369,6 @@ public sealed class FfmpegMediaWriter : IMediaWriter
         TimeSpan targetEnd,
         CancellationToken cancellationToken)
     {
-        MarkAudioTransportFinalizing();
         await CloseAudioTransportIfNoSamplesAsync(cancellationToken).ConfigureAwait(false);
         await videoGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -434,27 +436,12 @@ public sealed class FfmpegMediaWriter : IMediaWriter
             await videoPipe!.WriteAsync(padding, cancellationToken).ConfigureAwait(false);
             nextVideoFrame++;
             Interlocked.Increment(ref syntheticVideoFrameCount);
-            SignalAudioTransportProgress();
         }
 
         await videoPipe!.WriteAsync(realFrame, cancellationToken).ConfigureAwait(false);
         lastVideoFrame = realFrame;
         nextVideoFrame = checked(targetIndex + 1);
         hasVideo = true;
-        SignalAudioTransportProgress();
-    }
-
-    private void EnsureRuntimeVideoGapWithinBound(long targetVideoFrame)
-    {
-        var gapFrames = targetVideoFrame - nextVideoFrame;
-        var maximumGapFrames = checked((long)Math.Ceiling(
-            RecordingTimelinePolicy.MaximumRuntimeWriterGap.TotalSeconds * configuration!.VideoFormat.FramesPerSecond));
-        if (gapFrames <= maximumGapFrames)
-            return;
-
-        throw new MediaWriterException(
-            "MEDIA_ENCODER_FAILED",
-            "A video timestamp requested an unreasonable active-recording gap.");
     }
 
     private Process StartEncoder(string videoFifo, string audioFifo)
@@ -654,9 +641,7 @@ public sealed class FfmpegMediaWriter : IMediaWriter
                 audioWriterFailure);
         }
 
-        var chunk = new AudioTransportChunk(
-            bytes,
-            RequiredVideoFrameForAudioSample(audioEndSample));
+        var chunk = new AudioTransportChunk(bytes);
         var queueDepth = Interlocked.Increment(ref audioTransportQueueDepth);
         UpdateMaximum(ref maxAudioTransportQueueDepth, queueDepth);
         try
@@ -686,10 +671,6 @@ public sealed class FfmpegMediaWriter : IMediaWriter
             await foreach (var chunk in audioWriteQueue!.Reader.ReadAllAsync(audioTransportCancellation!.Token).ConfigureAwait(false))
             {
                 Interlocked.Decrement(ref audioTransportQueueDepth);
-                await WaitForVideoCoverageAsync(
-                        chunk.RequiredVideoFrame,
-                        audioTransportCancellation.Token)
-                    .ConfigureAwait(false);
                 await audioPipe!.WriteAsync(chunk.Bytes, audioTransportCancellation.Token).ConfigureAwait(false);
             }
         }
@@ -700,40 +681,6 @@ public sealed class FfmpegMediaWriter : IMediaWriter
             throw;
         }
     }
-
-    private async Task WaitForVideoCoverageAsync(
-        long requiredVideoFrame,
-        CancellationToken cancellationToken)
-    {
-        while (true)
-        {
-            Task waitForProgress;
-            lock (audioTransportGate)
-            {
-                if (audioTransportFinalizing || requiredVideoFrame <= Volatile.Read(ref nextVideoFrame))
-                    return;
-                waitForProgress = audioTransportChanged.Task;
-            }
-
-            await waitForProgress.WaitAsync(cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    private long RequiredVideoFrameForAudioSample(long audioEndSample) =>
-        checked((long)Math.Ceiling(
-            audioEndSample / (double)configuration!.AudioFormat.SampleRate * configuration.VideoFormat.FramesPerSecond));
-
-    private void SignalAudioTransportProgress()
-    {
-        lock (audioTransportGate)
-        {
-            audioTransportChanged.TrySetResult(true);
-            audioTransportChanged = CreateAudioTransportSignal();
-        }
-    }
-
-    private static TaskCompletionSource<bool> CreateAudioTransportSignal() =>
-        new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private static void UpdateMaximum(ref long maximum, long value)
     {
@@ -833,7 +780,7 @@ public sealed class FfmpegMediaWriter : IMediaWriter
     [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "close", SetLastError = true)]
     private static extern int NativeClose(int fileDescriptor);
 
-    private readonly record struct AudioTransportChunk(byte[] Bytes, long RequiredVideoFrame);
+    private readonly record struct AudioTransportChunk(byte[] Bytes);
 
     private static string ValidateExecutable(string path, string parameterName)
     {
