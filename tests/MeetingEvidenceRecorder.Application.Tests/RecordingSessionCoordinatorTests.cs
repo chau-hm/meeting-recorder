@@ -53,7 +53,7 @@ public sealed class RecordingSessionCoordinatorTests
     }
 
     [Fact]
-    public async Task StopKeepsWatermarkProgressAvailableWhileMediaIsBackpressured()
+    public async Task StopReleasesAudioTransportBackpressureBeforeDrainingPumps()
     {
         var capture = new FakeCapture([]);
         var writer = new BackpressuredMediaWriter();
@@ -72,18 +72,18 @@ public sealed class RecordingSessionCoordinatorTests
         await ArrangeBackpressuredMediaAsync(capture, writer);
 
         var stopTask = coordinator.StopAsync(CancellationToken.None);
-        var watermarkReleasedAudio = false;
+        var finalizationReleasedAudio = false;
         try
         {
             try
             {
-                await writer.WatermarkAdvancedWhileBlocked.Task.WaitAsync(TimeSpan.FromSeconds(2));
-                watermarkReleasedAudio = true;
+                await writer.FinalizationReleasedAudio.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                finalizationReleasedAudio = true;
             }
             catch (TimeoutException)
             {
-                // The pre-fix shutdown cancels this progress path before waiting for the blocked
-                // pumps. Release the fake transport below so the test can finish its cleanup.
+                // Release the fake transport below so the test can finish its cleanup if the
+                // shutdown path regresses into a wait.
             }
 
             var completion = await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
@@ -103,8 +103,8 @@ public sealed class RecordingSessionCoordinatorTests
         }
 
         Assert.True(
-            watermarkReleasedAudio,
-            "Watermark progress must release blocked audio before the video pump can drain.");
+            finalizationReleasedAudio,
+            "Finalization mode must release blocked audio before the video pump can drain.");
     }
 
     [Fact]
@@ -496,7 +496,28 @@ public sealed class RecordingSessionCoordinatorTests
         Assert.Equal(RecordingState.Completed, completion.State);
         Assert.Contains(TimeSpan.FromMilliseconds(1030), writer.VideoTimestamps);
         Assert.Contains(TimeSpan.FromSeconds(1), writer.AudioTimestamps);
-        Assert.Contains(TimeSpan.FromMilliseconds(250), writer.SafeVideoWatermarks);
+    }
+
+    [Fact]
+    public async Task CompletedManifestUsesCanonicalClockDurationInsteadOfFinalizedMediaDuration()
+    {
+        var writer = new FakeMediaWriter([])
+        {
+            FinalizedDurationOverride = TimeSpan.FromSeconds(100)
+        };
+        var store = new FakeBundleStoreFactory([]);
+        await using var coordinator = new RecordingSessionCoordinator(
+            new FakeCapture([]),
+            writer,
+            store,
+            new FakeClock { RunningElapsed = TimeSpan.FromSeconds(10) });
+
+        await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
+        var completion = await coordinator.StopAsync(CancellationToken.None);
+
+        Assert.Equal(RecordingState.Completed, completion.State);
+        Assert.Equal(TimeSpan.FromSeconds(10), completion.Duration);
+        Assert.Equal(10_000L, store.Store!.CommittedManifest!.DurationMs);
     }
 
     [Fact]
@@ -520,9 +541,11 @@ public sealed class RecordingSessionCoordinatorTests
 
         Assert.Equal(RecordingState.Incomplete, completion.State);
         Assert.Equal("MEDIA_TIMELINE_DISCONTINUITY", completion.Error!.Code);
+        Assert.Null(completion.Duration);
         Assert.True(coordinator.Completion.IsCompletedSuccessfully);
         Assert.Equal(1, capture.StopCalls);
         Assert.True(store.Store!.MarkedIncomplete);
+        Assert.Null(store.Store.IncompleteManifest!.DurationMs);
         Assert.Equal(0, writer.FinalizeCalls);
     }
 
@@ -547,9 +570,11 @@ public sealed class RecordingSessionCoordinatorTests
 
         Assert.Equal(RecordingState.Incomplete, completion.State);
         Assert.Equal("MEDIA_TIMELINE_DISCONTINUITY", completion.Error!.Code);
+        Assert.Null(completion.Duration);
         Assert.True(coordinator.Completion.IsCompletedSuccessfully);
         Assert.Equal(1, capture.StopCalls);
         Assert.True(store.Store!.MarkedIncomplete);
+        Assert.Null(store.Store.IncompleteManifest!.DurationMs);
         Assert.Equal(0, writer.FinalizeCalls);
     }
 
@@ -719,6 +744,7 @@ public sealed class RecordingSessionCoordinatorTests
         public Exception? VideoWriteFailure { get; set; }
         public Exception? AudioWriteFailure { get; set; }
         public Exception? FinalizeFailure { get; set; }
+        public TimeSpan? FinalizedDurationOverride { get; set; }
         public bool Initialized { get; private set; }
         public bool Disposed { get; private set; }
         public int DisposeCalls { get; private set; }
@@ -733,7 +759,6 @@ public sealed class RecordingSessionCoordinatorTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public List<TimeSpan> VideoTimestamps { get; } = [];
         public List<TimeSpan> AudioTimestamps { get; } = [];
-        public List<TimeSpan> SafeVideoWatermarks { get; } = [];
 
         public Task InitializeAsync(MediaWriterConfiguration configuration, CancellationToken cancellationToken)
         {
@@ -756,15 +781,6 @@ public sealed class RecordingSessionCoordinatorTests
             if (VideoTimestamps.Count >= 2)
                 SecondVideoWriteEntered.TrySetResult(true);
             await Task.CompletedTask;
-        }
-
-        public ValueTask AdvanceVideoWatermarkAsync(
-            TimeSpan safeThrough,
-            CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            SafeVideoWatermarks.Add(safeThrough);
-            return ValueTask.CompletedTask;
         }
 
         public async ValueTask WriteAudioAsync(
@@ -800,7 +816,7 @@ public sealed class RecordingSessionCoordinatorTests
             log.Add("writer-finalize");
             return Task.FromResult(new FinalizedMedia(
                 "recording.mp4",
-                recordingEnd,
+                FinalizedDurationOverride ?? recordingEnd,
                 new VideoFormat(2, 2, 30),
                 new AudioFormat(48000, 2),
                 HasVideo: true,
@@ -839,7 +855,7 @@ public sealed class RecordingSessionCoordinatorTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<bool> PendingVideoWriteEntered { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public TaskCompletionSource<bool> WatermarkAdvancedWhileBlocked { get; } =
+        public TaskCompletionSource<bool> FinalizationReleasedAudio { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<bool> SecondAudioWriteCompleted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -899,27 +915,18 @@ public sealed class RecordingSessionCoordinatorTests
             }
         }
 
-        public ValueTask BeginFinalizationAsync(CancellationToken cancellationToken) =>
-            ValueTask.CompletedTask;
+        public ValueTask BeginFinalizationAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            FinalizationReleasedAudio.TrySetResult(true);
+            blockedAudioRelease.TrySetResult(true);
+            return ValueTask.CompletedTask;
+        }
 
         public Task CompleteAudioTransportAsync(
             TimeSpan recordingEnd,
             CancellationToken cancellationToken) =>
             Task.CompletedTask;
-
-        public ValueTask AdvanceVideoWatermarkAsync(
-            TimeSpan safeThrough,
-            CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (Volatile.Read(ref audioBlocked) != 0)
-            {
-                WatermarkAdvancedWhileBlocked.TrySetResult(true);
-                blockedAudioRelease.TrySetResult(true);
-            }
-
-            return ValueTask.CompletedTask;
-        }
 
         public Task<FinalizedMedia> FinalizeAsync(
             TimeSpan recordingEnd,

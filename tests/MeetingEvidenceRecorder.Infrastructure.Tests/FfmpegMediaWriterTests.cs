@@ -220,15 +220,26 @@ public sealed class FfmpegMediaWriterTests
 
             await writer.WriteVideoAsync(CreateVideoFrame(0, TimeSpan.Zero, format, 127, 127, 127), CancellationToken.None);
             var audioSamples = new float[960 * 2];
-            for (var audioIndex = 0; audioIndex < 2000; audioIndex++)
+            Task? blockedAudioWrite = null;
+            var nextAudioIndex = 0;
+            for (; nextAudioIndex < 2000; nextAudioIndex++)
             {
-                var clockElapsed = TimeSpan.FromMilliseconds((audioIndex + 1) * 20);
-                await writer.AdvanceVideoWatermarkAsync(
-                    RecordingTimelinePolicy.GetSafeVideoCommitTime(clockElapsed),
-                    CancellationToken.None);
-                await WriteAudioChunkAsync(writer, audioIndex, audioSamples);
+                var audioWrite = WriteAudioChunkAsync(writer, nextAudioIndex, audioSamples);
                 await Task.Yield();
+                if (!audioWrite.IsCompleted)
+                {
+                    blockedAudioWrite = audioWrite;
+                    break;
+                }
+
+                await audioWrite;
             }
+
+            Assert.NotNull(blockedAudioWrite);
+            await writer.BeginFinalizationAsync(CancellationToken.None);
+            await blockedAudioWrite!.WaitAsync(TimeSpan.FromSeconds(5));
+            for (nextAudioIndex++; nextAudioIndex < 2000; nextAudioIndex++)
+                await WriteAudioChunkAsync(writer, nextAudioIndex, audioSamples);
 
             var finalized = await writer.FinalizeAsync(TimeSpan.FromSeconds(40), CancellationToken.None);
             var probe = await new FfmpegMediaProbe(ffprobePath).ProbeAsync(finalPath, CancellationToken.None);
@@ -275,10 +286,6 @@ public sealed class FfmpegMediaWriterTests
             var audioSamples = new float[960 * 2];
             for (var audioIndex = 0; audioIndex < 250; audioIndex++)
             {
-                var clockElapsed = TimeSpan.FromMilliseconds((audioIndex + 1) * 20);
-                await writer.AdvanceVideoWatermarkAsync(
-                    RecordingTimelinePolicy.GetSafeVideoCommitTime(clockElapsed),
-                    CancellationToken.None);
                 await WriteAudioChunkAsync(writer, audioIndex, audioSamples);
                 await Task.Yield();
             }
@@ -288,10 +295,6 @@ public sealed class FfmpegMediaWriterTests
                 CancellationToken.None);
             for (var audioIndex = 250; audioIndex < 300; audioIndex++)
             {
-                var clockElapsed = TimeSpan.FromMilliseconds((audioIndex + 1) * 20);
-                await writer.AdvanceVideoWatermarkAsync(
-                    RecordingTimelinePolicy.GetSafeVideoCommitTime(clockElapsed),
-                    CancellationToken.None);
                 await WriteAudioChunkAsync(writer, audioIndex, audioSamples);
                 await Task.Yield();
             }
@@ -367,17 +370,11 @@ public sealed class FfmpegMediaWriterTests
                     0,
                     0),
                 CancellationToken.None).AsTask();
-            await Task.Yield();
-            Assert.False(realVideoWrite.IsCompleted);
-
-            await writer.AdvanceVideoWatermarkAsync(
-                TimeSpan.FromSeconds(25),
-                CancellationToken.None);
-            await blockedAudioWrite.WaitAsync(TimeSpan.FromSeconds(5));
             await realVideoWrite.WaitAsync(TimeSpan.FromSeconds(5));
-
             Assert.Equal(0, writer.LateVideoFrameCount);
-            Assert.Equal(748, writer.SyntheticVideoFrameCount);
+            Assert.Equal(0, writer.SyntheticVideoFrameCount);
+            await writer.BeginFinalizationAsync(CancellationToken.None);
+            await blockedAudioWrite.WaitAsync(TimeSpan.FromSeconds(5));
         }
         finally
         {
@@ -439,6 +436,91 @@ public sealed class FfmpegMediaWriterTests
     }
 
     [Fact]
+    public async Task WriterRejectsHugeActiveVideoGapBeforeGeneratingPadding()
+    {
+        if (!OperatingSystem.IsMacOS())
+            throw SkipException.ForSkip("The FIFO media writer is macOS-specific.");
+
+        var ffmpegPath = FindExecutable("MEETING_RECORDER_FFMPEG", "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg");
+        var ffprobePath = FindExecutable("MEETING_RECORDER_FFPROBE", "/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe");
+        var root = Path.Combine(Path.GetTempPath(), $"meeting-recorder-video-gap-guard-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var format = new VideoFormat(2, 2, 30);
+            await using var writer = new FfmpegMediaWriter(ffmpegPath, ffprobePath);
+            await writer.InitializeAsync(
+                new MediaWriterConfiguration(
+                    Path.Combine(root, ".work"),
+                    Path.Combine(root, ".work", "recording.partial.mkv"),
+                    Path.Combine(root, "recording.mp4"),
+                    format,
+                    new AudioFormat(48000, 2)),
+                CancellationToken.None);
+
+            await writer.WriteVideoAsync(CreateVideoFrame(0, TimeSpan.Zero, format, 0, 0, 0), CancellationToken.None);
+            var exception = await Assert.ThrowsAsync<MediaWriterException>(() =>
+                writer.WriteVideoAsync(
+                    CreateVideoFrame(1, TimeSpan.FromSeconds(100), format, 255, 0, 0),
+                    CancellationToken.None).AsTask());
+
+            Assert.Equal("MEDIA_ENCODER_FAILED", exception.Code);
+            Assert.Equal(0, writer.SyntheticVideoFrameCount);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task WriterRejectsHugeActiveAudioGapBeforeGeneratingPadding()
+    {
+        if (!OperatingSystem.IsMacOS())
+            throw SkipException.ForSkip("The FIFO media writer is macOS-specific.");
+
+        var ffmpegPath = FindExecutable("MEETING_RECORDER_FFMPEG", "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg");
+        var ffprobePath = FindExecutable("MEETING_RECORDER_FFPROBE", "/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe");
+        var root = Path.Combine(Path.GetTempPath(), $"meeting-recorder-audio-gap-guard-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var format = new VideoFormat(2, 2, 30);
+            await using var writer = new FfmpegMediaWriter(ffmpegPath, ffprobePath);
+            await writer.InitializeAsync(
+                new MediaWriterConfiguration(
+                    Path.Combine(root, ".work"),
+                    Path.Combine(root, ".work", "recording.partial.mkv"),
+                    Path.Combine(root, "recording.mp4"),
+                    format,
+                    new AudioFormat(48000, 2)),
+                CancellationToken.None);
+
+            await writer.WriteVideoAsync(CreateVideoFrame(0, TimeSpan.Zero, format, 0, 0, 0), CancellationToken.None);
+            var exception = await Assert.ThrowsAsync<MediaWriterException>(() =>
+                writer.WriteAudioAsync(
+                    new TimedAudioFrame(
+                        new AudioFrame(
+                            AudioSourceKind.System,
+                            new NativeTimestamp(0, 1),
+                            960,
+                            new float[960 * 2],
+                            new AudioFormat(48000, 2)),
+                        TimeSpan.FromSeconds(100)),
+                    CancellationToken.None).AsTask());
+
+            Assert.Equal("MEDIA_ENCODER_FAILED", exception.Code);
+            Assert.Equal(0, writer.SyntheticVideoFrameCount);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task WriterPreservesRealVideoFramesWhenAudioArrivesBetweenFrames()
     {
         if (!OperatingSystem.IsMacOS())
@@ -465,8 +547,10 @@ public sealed class FfmpegMediaWriterTests
 
             await writer.WriteVideoAsync(CreateVideoFrame(0, TimeSpan.Zero, format, 0, 0, 0), CancellationToken.None);
             await WriteAudioChunkAsync(writer, 0);
+            Assert.Equal(0, writer.SyntheticVideoFrameCount);
             await writer.WriteVideoAsync(CreateVideoFrame(1, TimeSpan.FromMilliseconds(33), format, 255, 0, 0), CancellationToken.None);
             await WriteAudioChunkAsync(writer, 1);
+            Assert.Equal(0, writer.SyntheticVideoFrameCount);
             await writer.WriteVideoAsync(CreateVideoFrame(2, TimeSpan.FromMilliseconds(67), format, 0, 255, 0), CancellationToken.None);
             await WriteAudioChunkAsync(writer, 2);
             await writer.WriteVideoAsync(CreateVideoFrame(3, TimeSpan.FromMilliseconds(100), format, 0, 0, 255), CancellationToken.None);
@@ -482,6 +566,7 @@ public sealed class FfmpegMediaWriterTests
             AssertDominantChannel(decoded.AsSpan(1 * frameSize, frameSize), 0);
             AssertDominantChannel(decoded.AsSpan(2 * frameSize, frameSize), 1);
             AssertDominantChannel(decoded.AsSpan(3 * frameSize, frameSize), 2);
+            Assert.Equal(0, writer.LateVideoFrameCount);
         }
         finally
         {
@@ -526,6 +611,48 @@ public sealed class FfmpegMediaWriterTests
 
             Assert.Contains(diagnostics, item => item.Code == "BUNDLE_VIDEO_COVERAGE_INVALID");
             Assert.DoesNotContain(diagnostics, item => item.Code == "BUNDLE_AUDIO_COVERAGE_INVALID");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void CompletionValidatorRejectsMateriallyExtendedVideoStream()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"meeting-recorder-extended-media-{Guid.NewGuid():N}.mp4");
+        File.WriteAllBytes(path, [1]);
+        try
+        {
+            var probe = new StubMediaProbe(new MediaProbeResult(
+                TimeSpan.FromSeconds(10),
+                2,
+                2,
+                30,
+                48000,
+                "h264",
+                "aac",
+                HasVideo: true,
+                HasAudio: true,
+                VideoStartTime: TimeSpan.Zero,
+                VideoDuration: TimeSpan.FromSeconds(10),
+                VideoEndTime: TimeSpan.FromSeconds(10),
+                AudioStartTime: TimeSpan.Zero,
+                AudioDuration: TimeSpan.FromSeconds(5),
+                AudioEndTime: TimeSpan.FromSeconds(5)));
+
+            var diagnostics = new FfmpegCompletionMediaValidator(probe).Validate(
+                path,
+                CreateCandidate(new FinalizedMedia(
+                    path,
+                    TimeSpan.FromSeconds(5),
+                    new VideoFormat(2, 2, 30),
+                    new AudioFormat(48000, 2),
+                    HasVideo: true,
+                    HasAudio: true)));
+
+            Assert.Contains(diagnostics, item => item.Code == "BUNDLE_VIDEO_COVERAGE_INVALID");
         }
         finally
         {

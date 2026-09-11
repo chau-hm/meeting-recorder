@@ -125,11 +125,23 @@ public sealed class FfmpegCompletionMediaValidator : ICompletionMediaValidator
                 $"The finalized {streamName.ToLowerInvariant()} stream starts at {startTime.TotalMilliseconds:0} ms, after the canonical recording start."));
         }
 
-        if (endTime + StreamCoverageTolerance < expectedDuration)
+        var minimumAllowedEnd = expectedDuration <= StreamCoverageTolerance
+            ? TimeSpan.Zero
+            : expectedDuration - StreamCoverageTolerance;
+        var maximumAllowedEnd = expectedDuration >= TimeSpan.MaxValue - StreamCoverageTolerance
+            ? TimeSpan.MaxValue
+            : expectedDuration + StreamCoverageTolerance;
+        if (endTime < minimumAllowedEnd)
         {
             diagnostics.Add(new(
                 $"BUNDLE_{streamName}_COVERAGE_INVALID",
                 $"The finalized {streamName.ToLowerInvariant()} stream ends at {endTime.TotalMilliseconds:0} ms, before the canonical recording end of {expectedDuration.TotalMilliseconds:0} ms."));
+        }
+        else if (endTime > maximumAllowedEnd)
+        {
+            diagnostics.Add(new(
+                $"BUNDLE_{streamName}_COVERAGE_INVALID",
+                $"The finalized {streamName.ToLowerInvariant()} stream ends at {endTime.TotalMilliseconds:0} ms, beyond the canonical recording end of {expectedDuration.TotalMilliseconds:0} ms."));
         }
     }
 }

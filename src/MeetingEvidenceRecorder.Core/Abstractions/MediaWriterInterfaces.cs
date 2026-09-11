@@ -31,10 +31,6 @@ public interface IMediaWriter : IAsyncDisposable
         TimeSpan recordingEnd,
         CancellationToken cancellationToken);
 
-    ValueTask AdvanceVideoWatermarkAsync(
-        TimeSpan safeThrough,
-        CancellationToken cancellationToken);
-
     Task<FinalizedMedia> FinalizeAsync(
         TimeSpan recordingEnd,
         CancellationToken cancellationToken);

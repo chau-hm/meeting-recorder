@@ -1408,26 +1408,17 @@ public interface IMediaWriter : IAsyncDisposable
         TimeSpan recordingEnd,
         CancellationToken cancellationToken);
 
-    ValueTask AdvanceVideoWatermarkAsync(
-        TimeSpan safeThrough,
-        CancellationToken cancellationToken);
-
     Task FinalizeAsync(
         CancellationToken cancellationToken);
 }
 ```
 
-During active recording, the application supplies this watermark from the canonical
-`RecordingClock` after the bounded video reorder allowance has elapsed. The media writer may
-repeat the last committed video frame only for CFR slots strictly before that watermark; audio
-timestamps must not advance the watermark directly. Finalization remains the authoritative point
-for extending the remaining static video tail to the canonical recording end.
-
-Real video admission is performed under the video scheduling gate before a frame waits on the
-global media serialization gate. This keeps accepted real frames visible to watermark scheduling
-while audio transport is under bounded backpressure; if the watermark commits an admitted frame,
-the later serialized write completion treats it as already committed real evidence rather than as
-a late frame.
+During active recording, only `WriteVideoAsync` may advance committed video content. When a later
+real frame arrives, the writer may repeat the last real frame for missing CFR slots before that
+frame and then writes the real frame at its normalized position. Audio transport is independently
+bounded and may wait for real video coverage, but it never commits video slots. Finalization is the
+only path allowed to extend a static tail, and its endpoint is the canonical `RecordingClock`
+value supplied by the coordinator.
 
 首個 implementation：
 
@@ -2801,31 +2792,23 @@ Disable new hotkey events
         ↓
 Stop capture producers
         ↓
-Allow accepted audio to drain without waiting for video coverage
+Drain accepted queues
         ↓
 Complete canonical audio tail and close the audio input
         ↓
-Drain accepted video while canonical-clock watermark progress remains available
+Extend final video tail to the canonical recording end
         ↓
-Stop the watermark progress mechanism
-        ↓
-Stop audio mixer
-        ↓
-Flush encoder
-        ↓
-Close muxer
+Flush encoder and close muxer
         ↓
 Finalize media at the capture-stop recording end
         ↓
 Finalize manifest
 ```
 
-The capture-stop recording end is captured before accepted media drains. Watermark progress
-must remain available during that drain because it can be the mechanism that releases bounded
-audio backpressure. The audio transport is switched to finalization mode before the audio pump
-drains, then its canonical tail is written and its FIFO is closed before final video extension.
-Closing the audio input removes the inter-stream EOF dependency that can otherwise leave a blocked
-video FIFO waiting forever for more audio.
+The capture-stop recording end is captured before accepted media drains. The audio transport is
+switched to finalization mode before the audio pump drains, then its canonical tail is written and
+its FIFO is closed before final video extension. Closing the audio input removes the inter-stream
+EOF dependency that can otherwise leave a blocked video FIFO waiting forever for more audio.
 
 唔可以：
 
