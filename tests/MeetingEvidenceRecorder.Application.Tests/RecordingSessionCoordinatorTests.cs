@@ -21,7 +21,7 @@ public sealed class RecordingSessionCoordinatorTests
             capture,
             writer,
             store,
-            new FakeClock());
+            new FakeClock { RunningElapsed = TimeSpan.FromSeconds(2) });
 
         await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
         Assert.Equal(RecordingState.Recording, coordinator.State);
@@ -50,6 +50,117 @@ public sealed class RecordingSessionCoordinatorTests
         Assert.Equal(48000, store.Store.CommittedManifest.Recording.Audio.SampleRate);
         Assert.Contains("capture-stop", log);
         Assert.Contains("writer-finalize", log);
+    }
+
+    [Fact]
+    public async Task StopKeepsWatermarkProgressAvailableWhileMediaIsBackpressured()
+    {
+        var capture = new FakeCapture([]);
+        var writer = new BackpressuredMediaWriter();
+        var store = new FakeBundleStoreFactory([]);
+        await using var coordinator = new RecordingSessionCoordinator(
+            capture,
+            writer,
+            store,
+            new FakeClock
+            {
+                RunningElapsed = TimeSpan.FromSeconds(2),
+                StoppedElapsed = TimeSpan.FromSeconds(99)
+            });
+
+        await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
+        await ArrangeBackpressuredMediaAsync(capture, writer);
+
+        var stopTask = coordinator.StopAsync(CancellationToken.None);
+        var watermarkReleasedAudio = false;
+        try
+        {
+            try
+            {
+                await writer.WatermarkAdvancedWhileBlocked.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                watermarkReleasedAudio = true;
+            }
+            catch (TimeoutException)
+            {
+                // The pre-fix shutdown cancels this progress path before waiting for the blocked
+                // pumps. Release the fake transport below so the test can finish its cleanup.
+            }
+
+            var completion = await stopTask.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Equal(RecordingState.Completed, completion.State);
+            Assert.Equal(TimeSpan.FromSeconds(2), completion.Duration);
+            Assert.Equal(1, writer.FinalizeCalls);
+            Assert.True(writer.SecondAudioWriteCompleted.Task.IsCompletedSuccessfully);
+            Assert.True(writer.SecondVideoWriteCompleted.Task.IsCompletedSuccessfully);
+            Assert.Equal(1, capture.StopCalls);
+        }
+        finally
+        {
+            writer.ReleaseBlockedAudio();
+            await writer.SecondAudioWriteCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await writer.SecondVideoWriteCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await stopTask.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
+        Assert.True(
+            watermarkReleasedAudio,
+            "Watermark progress must release blocked audio before the video pump can drain.");
+    }
+
+    [Fact]
+    public async Task FatalShutdownCancelsBackpressuredMediaWithoutHanging()
+    {
+        var capture = new FakeCapture([]);
+        var writer = new BackpressuredMediaWriter();
+        var store = new FakeBundleStoreFactory([]);
+        await using var coordinator = new RecordingSessionCoordinator(
+            capture,
+            writer,
+            store,
+            new FakeClock { RunningElapsed = TimeSpan.FromSeconds(2) });
+
+        await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
+        await ArrangeBackpressuredMediaAsync(capture, writer);
+        capture.RaiseError(new RecorderError(
+            "CAPTURE_SOURCE_LOST",
+            RecorderErrorSeverity.Fatal,
+            "The selected display is no longer available.",
+            "Synthetic source loss while media is backpressured."));
+
+        var completion = await coordinator.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(RecordingState.Incomplete, completion.State);
+        Assert.Equal("CAPTURE_SOURCE_LOST", completion.Error!.Code);
+        Assert.Equal(1, capture.StopCalls);
+        Assert.Equal(0, writer.FinalizeCalls);
+        Assert.True(writer.Disposed);
+        Assert.True(store.Store!.MarkedIncomplete);
+    }
+
+    [Fact]
+    public async Task DisposeCompletesWhileMediaIsBackpressured()
+    {
+        var capture = new FakeCapture([]);
+        var writer = new BackpressuredMediaWriter();
+        var store = new FakeBundleStoreFactory([]);
+        var coordinator = new RecordingSessionCoordinator(
+            capture,
+            writer,
+            store,
+            new FakeClock { RunningElapsed = TimeSpan.FromSeconds(2) });
+
+        await coordinator.StartAsync(CreateOptions(), CancellationToken.None);
+        await ArrangeBackpressuredMediaAsync(capture, writer);
+
+        await coordinator.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        var completion = await coordinator.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(RecordingState.Incomplete, completion.State);
+        Assert.Equal("RECORDING_DISPOSED", completion.Error!.Code);
+        Assert.Equal(1, capture.StopCalls);
+        Assert.Equal(0, writer.FinalizeCalls);
+        Assert.True(writer.Disposed);
+        Assert.True(store.Store!.MarkedIncomplete);
     }
 
     [Fact]
@@ -467,10 +578,26 @@ public sealed class RecordingSessionCoordinatorTests
             new CaptureSource("display-1", "Display 1", CaptureSourceKind.Display, 2, 2),
             new VideoCaptureOptions(30, ShowCursor: false));
 
+    private static async Task ArrangeBackpressuredMediaAsync(
+        FakeCapture capture,
+        BackpressuredMediaWriter writer)
+    {
+        capture.EmitVideo(new NativeTimestamp(0, 1));
+        capture.EmitAudio(new NativeTimestamp(0, 1), sampleCount: 960);
+        await writer.FirstVideoWriteCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await writer.FirstAudioWriteCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        capture.EmitAudio(new NativeTimestamp(20, 1000), sampleCount: 960);
+        await writer.BlockedAudioWriteEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        capture.EmitVideo(new NativeTimestamp(20, 1000));
+        await writer.PendingVideoWriteEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
     private sealed class FakeClock : IRecordingClock
     {
         public TimeSpan Elapsed { get; private set; }
         public TimeSpan RunningElapsed { get; init; }
+        public TimeSpan StoppedElapsed { get; init; } = TimeSpan.FromSeconds(2);
         public bool IsRunning { get; private set; }
         public bool IsPaused => false;
 
@@ -485,7 +612,7 @@ public sealed class RecordingSessionCoordinatorTests
         public void Stop()
         {
             IsRunning = false;
-            Elapsed = TimeSpan.FromSeconds(2);
+            Elapsed = StoppedElapsed;
         }
     }
 
@@ -681,6 +808,124 @@ public sealed class RecordingSessionCoordinatorTests
                 log.Add("writer-dispose");
             }
 
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class BackpressuredMediaWriter : IMediaWriter
+    {
+        private readonly SemaphoreSlim writeGate = new(1, 1);
+        private readonly TaskCompletionSource<bool> blockedAudioRelease =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int audioWriteCount;
+        private int videoWriteCount;
+        private int audioBlocked;
+
+        public bool Disposed { get; private set; }
+
+        public TaskCompletionSource<bool> FirstVideoWriteCompleted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> FirstAudioWriteCompleted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> BlockedAudioWriteEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> PendingVideoWriteEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> WatermarkAdvancedWhileBlocked { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> SecondAudioWriteCompleted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> SecondVideoWriteCompleted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int FinalizeCalls { get; private set; }
+
+        public Task InitializeAsync(
+            MediaWriterConfiguration configuration,
+            CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public async ValueTask WriteVideoAsync(
+            TimedVideoFrame frame,
+            CancellationToken cancellationToken)
+        {
+            if (Volatile.Read(ref audioBlocked) != 0)
+                PendingVideoWriteEntered.TrySetResult(true);
+
+            await writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (Interlocked.Increment(ref videoWriteCount) == 1)
+                    FirstVideoWriteCompleted.TrySetResult(true);
+                else
+                    SecondVideoWriteCompleted.TrySetResult(true);
+            }
+            finally
+            {
+                writeGate.Release();
+            }
+        }
+
+        public async ValueTask WriteAudioAsync(
+            TimedAudioFrame frame,
+            CancellationToken cancellationToken)
+        {
+            await writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (Interlocked.Increment(ref audioWriteCount) == 2)
+                {
+                    Volatile.Write(ref audioBlocked, 1);
+                    BlockedAudioWriteEntered.TrySetResult(true);
+                    await blockedAudioRelease.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    Volatile.Write(ref audioBlocked, 0);
+                }
+
+                if (audioWriteCount == 1)
+                    FirstAudioWriteCompleted.TrySetResult(true);
+                else
+                    SecondAudioWriteCompleted.TrySetResult(true);
+            }
+            finally
+            {
+                writeGate.Release();
+            }
+        }
+
+        public ValueTask AdvanceVideoWatermarkAsync(
+            TimeSpan safeThrough,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Volatile.Read(ref audioBlocked) != 0)
+            {
+                WatermarkAdvancedWhileBlocked.TrySetResult(true);
+                blockedAudioRelease.TrySetResult(true);
+            }
+
+            return ValueTask.CompletedTask;
+        }
+
+        public Task<FinalizedMedia> FinalizeAsync(
+            TimeSpan recordingEnd,
+            CancellationToken cancellationToken)
+        {
+            FinalizeCalls++;
+            return Task.FromResult(new FinalizedMedia(
+                "recording.mp4",
+                recordingEnd,
+                new VideoFormat(2, 2, 30),
+                new AudioFormat(48000, 2),
+                HasVideo: true,
+                HasAudio: true));
+        }
+
+        public void ReleaseBlockedAudio() => blockedAudioRelease.TrySetResult(true);
+
+        public ValueTask DisposeAsync()
+        {
+            ReleaseBlockedAudio();
+            Disposed = true;
+            writeGate.Dispose();
             return ValueTask.CompletedTask;
         }
     }

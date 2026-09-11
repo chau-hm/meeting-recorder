@@ -222,6 +222,7 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
     private async Task<RecordingCompletion> StopCoreAsync(bool forceIncomplete)
     {
         var sessionToken = sessionCancellation?.Token ?? CancellationToken.None;
+        TimeSpan? recordingEnd = null;
         Exception? pipelineFailure = null;
 
         try
@@ -238,6 +239,7 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
                     sessionCancellation?.Cancel();
                     throw;
                 }
+                recordingEnd = clock.Elapsed;
             }
 
             if (timestampMapper is { HasOrigin: false })
@@ -249,10 +251,9 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
                     "The shared recording timeline could not be established for both required streams.")));
             }
 
-            videoWatermarkCancellation?.Cancel();
-            await AwaitPumpForShutdownAsync(videoWatermarkPump, []).ConfigureAwait(false);
-            await AwaitPumpForShutdownAsync(videoWatermarkObserver, []).ConfigureAwait(false);
-
+            // Keep watermark progress alive while accepted media drains. A blocked audio write
+            // can own the writer gate while a video write waits behind it; the watermark pump is
+            // the independent path that releases the audio transport dependency.
             await AwaitPumpAsync(videoPump, sessionToken).ConfigureAwait(false);
             // Capture has stopped and the video pump has drained, so no later real frame can
             // occupy an active-recording slot. Release the bounded audio tail before waiting for
@@ -262,6 +263,10 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
                     CancellationToken.None)
                 .ConfigureAwait(false);
             await AwaitPumpAsync(audioPump, sessionToken).ConfigureAwait(false);
+
+            videoWatermarkCancellation?.Cancel();
+            await AwaitPumpForShutdownAsync(videoWatermarkPump, []).ConfigureAwait(false);
+            await AwaitPumpForShutdownAsync(videoWatermarkObserver, []).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -278,10 +283,10 @@ public sealed class RecordingSessionCoordinator : IAsyncDisposable
             return await FailAfterStopAsync(failure, primaryRuntimeError).ConfigureAwait(false);
         }
 
+        recordingEnd ??= clock.Elapsed;
         clock.Stop();
-        var recordingEnd = clock.Elapsed;
         var finalized = await mediaWriter.FinalizeAsync(
-            recordingEnd,
+            recordingEnd.Value,
             CancellationToken.None).ConfigureAwait(false);
         await mediaWriter.DisposeAsync().ConfigureAwait(false);
 

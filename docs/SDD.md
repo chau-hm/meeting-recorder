@@ -2788,7 +2788,15 @@ Disable new hotkey events
         ↓
 Stop capture producers
         ↓
-Drain queues
+Keep canonical-clock video watermark progress available
+        ↓
+Drain accepted audio/video media
+        ↓
+Advance the final active watermark after video input is drained
+        ↓
+Drain the remaining bounded audio tail
+        ↓
+Stop the watermark progress mechanism
         ↓
 Stop audio mixer
         ↓
@@ -2796,10 +2804,14 @@ Flush encoder
         ↓
 Close muxer
         ↓
-Finalize media
+Finalize media at the capture-stop recording end
         ↓
 Finalize manifest
 ```
+
+The capture-stop recording end is captured before accepted media drains. Watermark progress
+must remain available during that drain because it can be the mechanism that releases bounded
+audio backpressure; stopping it first can leave the video and audio pumps waiting on each other.
 
 唔可以：
 

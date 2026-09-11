@@ -148,13 +148,11 @@ public sealed class FfmpegMediaWriter : IMediaWriter
             return;
         }
 
-        var advanced = await CommitVideoFramesAsync(
+        await CommitVideoFramesAsync(
                 safeThroughFrameCount: null,
                 expectedBytes,
                 cancellationToken)
             .ConfigureAwait(false);
-        if (advanced)
-            SignalAudioTransportProgress();
     }
 
     public async ValueTask WriteAudioAsync(TimedAudioFrame timedFrame, CancellationToken cancellationToken)
@@ -188,13 +186,11 @@ public sealed class FfmpegMediaWriter : IMediaWriter
                 configuration!.VideoFormat.Width *
                 configuration.VideoFormat.Height *
                 4);
-            var advanced = await CommitVideoFramesAsync(
+            await CommitVideoFramesAsync(
                     safeThroughFrameCount,
                     expectedBytes,
                     cancellationToken)
                 .ConfigureAwait(false);
-            if (advanced)
-                SignalAudioTransportProgress();
         }
         finally
         {
@@ -414,6 +410,8 @@ public sealed class FfmpegMediaWriter : IMediaWriter
                 nextVideoFrame++;
                 hasVideo = true;
                 advanced = true;
+                // Publish coverage before a later FIFO write can block the commit loop.
+                SignalAudioTransportProgress();
                 continue;
             }
 
@@ -433,6 +431,7 @@ public sealed class FfmpegMediaWriter : IMediaWriter
             nextVideoFrame++;
             Interlocked.Increment(ref syntheticVideoFrameCount);
             advanced = true;
+            SignalAudioTransportProgress();
         }
     }
 
